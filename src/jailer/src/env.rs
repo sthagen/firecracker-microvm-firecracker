@@ -9,8 +9,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::cgroup;
-use crate::cgroup::Cgroup;
+use crate::cgroup::{Cgroup, CgroupBuilder};
 use crate::chroot::chroot;
 use crate::resource_limits::{ResourceLimits, FSIZE_ARG, NO_FILE_ARG};
 use crate::{Error, Result};
@@ -93,7 +92,7 @@ pub struct Env {
     start_time_cpu_us: u64,
     jailer_cpu_time_us: u64,
     extra_args: Vec<String>,
-    cgroups: Vec<Cgroup>,
+    cgroups: Vec<Box<dyn Cgroup>>,
     resource_limits: ResourceLimits,
 }
 
@@ -159,7 +158,15 @@ impl Env {
         let new_pid_ns = arguments.flag_present("new-pid-ns");
 
         // Optional arguments.
-        let mut cgroups = Vec::new();
+        let mut cgroups: Vec<Box<dyn Cgroup>> = Vec::new();
+        let cgroup_ver = arguments
+            .single_value("cgroup-version")
+            .ok_or_else(|| Error::ArgumentParsing(MissingValue("cgroup-version".to_string())))?;
+        let cgroup_ver = cgroup_ver
+            .parse::<u8>()
+            .map_err(|_| Error::CgroupInvalidVersion(cgroup_ver.to_string()))?;
+
+        let mut cgroup_builder = None;
 
         // If `--node` is used, the corresponding cgroups will be created.
         if let Some(numa_node_str) = arguments.single_value("node") {
@@ -167,25 +174,28 @@ impl Env {
                 .parse::<u32>()
                 .map_err(|_| Error::NumaNode(numa_node_str.to_owned()))?;
 
-            let mut numa_cgroups = cgroup::cgroups_from_numa_node(numa_node, id, &exec_file_name)?;
+            let builder = cgroup_builder.get_or_insert(CgroupBuilder::new(cgroup_ver)?);
+
+            let mut numa_cgroups =
+                builder.cgroups_from_numa_node(numa_node, id, &exec_file_name)?;
             cgroups.append(&mut numa_cgroups);
         }
 
         // cgroup format: <cgroup_controller>.<cgroup_property>=<value>,...
         if let Some(cgroups_args) = arguments.multiple_values("cgroup") {
+            let builder = cgroup_builder.get_or_insert(CgroupBuilder::new(cgroup_ver)?);
             for cg in cgroups_args {
                 let aux: Vec<&str> = cg.split('=').collect();
                 if aux.len() != 2 || aux[1].is_empty() {
                     return Err(Error::CgroupFormat(cg.to_string()));
                 }
 
-                let cgroup = Cgroup::new(
+                let cgroup = builder.new_cgroup(
                     aux[0].to_string(), // cgroup file
                     aux[1].to_string(), // cgroup value
                     id,
                     &exec_file_name,
                 )?;
-
                 cgroups.push(cgroup);
             }
         }
@@ -577,6 +587,7 @@ impl Env {
 mod tests {
     use super::*;
     use crate::build_arg_parser;
+    use crate::cgroup::test_util::MockCgroupFs;
 
     use std::os::linux::fs::MetadataExt;
     use std::os::unix::ffi::OsStrExt;
@@ -682,6 +693,9 @@ mod tests {
 
     #[test]
     fn test_new_env() {
+        let mut mock_cgroups = MockCgroupFs::new().unwrap();
+        assert!(!mock_cgroups.add_v1_mounts().is_err());
+
         let good_arg_vals = ArgVals::new();
         let arg_parser = build_arg_parser();
         let mut args = arg_parser.arguments().clone();
@@ -817,6 +831,8 @@ mod tests {
 
     #[test]
     fn test_setup_jailed_folder() {
+        let mut mock_cgroups = MockCgroupFs::new().unwrap();
+        assert!(!mock_cgroups.add_v1_mounts().is_err());
         let env = create_env();
 
         // Error case: non UTF-8 paths.
@@ -865,6 +881,8 @@ mod tests {
     fn test_mknod_and_own_dev() {
         use std::os::unix::fs::FileTypeExt;
 
+        let mut mock_cgroups = MockCgroupFs::new().unwrap();
+        assert!(!mock_cgroups.add_v1_mounts().is_err());
         let env = create_env();
 
         // Ensure path buffers without NULL-termination are handled well.
@@ -916,6 +934,8 @@ mod tests {
         // Create a standard environment.
         let arg_parser = build_arg_parser();
         let mut args = arg_parser.arguments().clone();
+        let mut mock_cgroups = MockCgroupFs::new().unwrap();
+        assert!(!mock_cgroups.add_v1_mounts().is_err());
 
         // Create tmp resources for `exec_file` and `chroot_base`.
         let some_file = TempFile::new_with_prefix("/tmp/").unwrap();
@@ -989,6 +1009,8 @@ mod tests {
     fn test_cgroups_parsing() {
         let arg_parser = build_arg_parser();
         let good_arg_vals = ArgVals::new();
+        let mut mock_cgroups = MockCgroupFs::new().unwrap();
+        assert!(!mock_cgroups.add_v1_mounts().is_err());
 
         // Cases that should fail
 
@@ -1126,6 +1148,9 @@ mod tests {
     #[test]
     #[cfg(target_arch = "aarch64")]
     fn test_copy_cache_info() {
+        let mut mock_cgroups = MockCgroupFs::new().unwrap();
+        assert!(!mock_cgroups.add_v1_mounts().is_err());
+
         let env = create_env();
 
         // Create the required chroot dir hierarchy.
@@ -1149,6 +1174,9 @@ mod tests {
         let exec_file_name = "file";
         let pid_file_name = "file.pid";
         let pid = 1;
+
+        let mut mock_cgroups = MockCgroupFs::new().unwrap();
+        assert!(!mock_cgroups.add_v1_mounts().is_err());
 
         let mut env = create_env();
         env.save_exec_file_pid(pid, PathBuf::from(exec_file_name))
