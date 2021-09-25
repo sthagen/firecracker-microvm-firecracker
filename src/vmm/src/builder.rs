@@ -3,11 +3,19 @@
 
 //! Enables pre-boot setup, instantiation and booting of a Firecracker VMM.
 
+use devices::legacy::serial::ReadableFd;
+use devices::legacy::EventFdTrigger;
+use devices::legacy::SerialDevice;
+use devices::legacy::SerialEventsWrapper;
+use devices::legacy::SerialWrapper;
+use libc::EFD_NONBLOCK;
+use logger::METRICS;
 use std::convert::TryFrom;
 use std::fmt::{Display, Formatter};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
+use vm_superio::Serial;
 
 #[cfg(target_arch = "aarch64")]
 use crate::construct_kvm_mpidrs;
@@ -30,12 +38,9 @@ use arch::InitrdConfig;
 use cpuid::common::is_same_model;
 #[cfg(target_arch = "aarch64")]
 use devices::legacy::RTCDevice;
-use devices::legacy::Serial;
 use devices::virtio::{Balloon, Block, MmioTransport, Net, VirtioDevice, Vsock, VsockUnixBackend};
 use event_manager::{MutEventSubscriber, SubscriberOps};
 use kernel::cmdline::Cmdline as KernelCmdline;
-#[cfg(target_arch = "aarch64")]
-use logger::METRICS;
 use logger::{error, warn};
 use seccompiler::BpfThreadMap;
 use snapshot::Persist;
@@ -44,7 +49,7 @@ use utils::terminal::Terminal;
 use utils::time::TimestampUs;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 #[cfg(target_arch = "aarch64")]
-use vm_superio::RTC;
+use vm_superio::Rtc;
 
 /// Errors associated with starting the instance.
 #[derive(Debug)]
@@ -191,7 +196,7 @@ impl AsRawFd for SerialStdin {
     }
 }
 
-impl devices::legacy::ReadableFd for SerialStdin {}
+impl ReadableFd for SerialStdin {}
 
 impl VmmEventsObserver for SerialStdin {
     fn on_vmm_boot(&mut self) -> std::result::Result<(), utils::errno::Error> {
@@ -653,17 +658,23 @@ pub fn setup_interrupt_controller(
 /// Sets up the serial device.
 pub fn setup_serial_device(
     event_manager: &mut EventManager,
-    input: Box<dyn devices::legacy::ReadableFd + Send>,
+    input: Box<dyn ReadableFd + Send>,
     out: Box<dyn io::Write + Send>,
-) -> super::Result<Arc<Mutex<Serial>>> {
-    let interrupt_evt = EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?;
-    let kick_stdin_read_evt = EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?;
-    let serial = Arc::new(Mutex::new(Serial::new_in_out(
-        interrupt_evt,
-        input,
-        out,
-        Some(kick_stdin_read_evt),
-    )));
+) -> super::Result<Arc<Mutex<SerialDevice>>> {
+    let interrupt_evt = EventFdTrigger::new(EventFd::new(EFD_NONBLOCK).map_err(Error::EventFd)?);
+    let kick_stdin_read_evt =
+        EventFdTrigger::new(EventFd::new(EFD_NONBLOCK).map_err(Error::EventFd)?);
+    let serial = Arc::new(Mutex::new(SerialWrapper {
+        serial: Serial::with_events(
+            interrupt_evt,
+            SerialEventsWrapper {
+                metrics: METRICS.uart.clone(),
+                buffer_ready_event_fd: Some(kick_stdin_read_evt),
+            },
+            out,
+        ),
+        input: Some(input),
+    }));
     event_manager.add_subscriber(serial.clone());
     Ok(serial)
 }
@@ -671,14 +682,14 @@ pub fn setup_serial_device(
 #[cfg(target_arch = "aarch64")]
 /// Sets up the RTC device.
 pub fn setup_rtc_device() -> Arc<Mutex<RTCDevice>> {
-    let rtc = RTC::with_events(METRICS.rtc.clone());
+    let rtc = Rtc::with_events(METRICS.rtc.clone());
     Arc::new(Mutex::new(rtc))
 }
 
 #[cfg(target_arch = "x86_64")]
 fn create_pio_dev_manager_with_legacy_devices(
     vm: &Vm,
-    serial: Arc<Mutex<devices::legacy::Serial>>,
+    serial: Arc<Mutex<SerialDevice>>,
     i8042_reset_evfd: EventFd,
 ) -> std::result::Result<PortIODeviceManager, super::Error> {
     let mut pio_dev_mgr =
@@ -961,9 +972,17 @@ pub mod tests {
     #[cfg(target_arch = "x86_64")]
     fn default_portio_device_manager() -> PortIODeviceManager {
         PortIODeviceManager::new(
-            Arc::new(Mutex::new(Serial::new_sink(
-                EventFd::new(libc::EFD_NONBLOCK).unwrap(),
-            ))),
+            Arc::new(Mutex::new(SerialWrapper {
+                serial: Serial::with_events(
+                    EventFdTrigger::new(EventFd::new(EFD_NONBLOCK).unwrap()),
+                    SerialEventsWrapper {
+                        metrics: METRICS.uart.clone(),
+                        buffer_ready_event_fd: None,
+                    },
+                    Box::new(std::io::sink()),
+                ),
+                input: None,
+            })),
             EventFd::new(libc::EFD_NONBLOCK).unwrap(),
         )
         .unwrap()

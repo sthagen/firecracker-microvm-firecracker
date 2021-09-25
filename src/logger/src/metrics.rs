@@ -64,7 +64,6 @@ use std::fmt;
 use std::io::Write;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-#[cfg(target_arch = "aarch64")]
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -73,7 +72,7 @@ use crate::warn;
 use lazy_static::lazy_static;
 use serde::{Serialize, Serializer};
 #[cfg(target_arch = "aarch64")]
-use vm_superio::rtc_pl031::RTCEvents;
+use vm_superio::rtc_pl031::RtcEvents;
 
 use super::extract_guard;
 
@@ -634,7 +633,7 @@ pub struct RTCDeviceMetrics {
 }
 
 #[cfg(target_arch = "aarch64")]
-impl RTCEvents for RTCDeviceMetrics {
+impl RtcEvents for RTCDeviceMetrics {
     fn invalid_read(&self) {
         self.missed_read_count.inc();
         self.error_count.inc();
@@ -810,7 +809,7 @@ pub struct FirecrackerMetrics {
     /// Metrics related to the virtual machine manager.
     pub vmm: VmmMetrics,
     /// Metrics related to the UART device.
-    pub uart: SerialDeviceMetrics,
+    pub uart: Arc<SerialDeviceMetrics>,
     /// Metrics related to signals.
     pub signals: SignalMetrics,
     /// Metrics related to virtio-vsockets.
