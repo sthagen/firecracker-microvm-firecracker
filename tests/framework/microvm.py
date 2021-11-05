@@ -33,8 +33,8 @@ from framework.defs import MICROVM_KERNEL_RELPATH, MICROVM_FSFILES_RELPATH, \
 from framework.http import Session
 from framework.jailer import JailerContext
 from framework.resources import Actions, Balloon, BootSource, Drive, \
-    DescribeInstance, FullConfig, Logger, MMDS, MachineConfigure, \
-    Metrics, Network, Vm, Vsock, SnapshotHelper
+    DescribeInstance, FullConfig, InstanceVersion, Logger, MMDS, \
+    MachineConfigure, Metrics, Network, Vm, Vsock, SnapshotHelper
 
 LOG = logging.getLogger("microvm")
 
@@ -115,6 +115,7 @@ class Microvm:
         self.mmds = None
         self.network = None
         self.machine_cfg = None
+        self.version = None
         self.vm = None
         self.vsock = None
         self.snapshot = None
@@ -488,6 +489,7 @@ class Microvm:
         self.mmds = MMDS(self._api_socket, self._api_session)
         self.network = Network(self._api_socket, self._api_session)
         self.snapshot = SnapshotHelper(self._api_socket, self._api_session)
+        self.version = InstanceVersion(self._api_socket, self._api_session)
         self.vm = Vm(self._api_socket, self._api_session)
         self.vsock = Vsock(self._api_socket, self._api_session)
 
@@ -649,7 +651,7 @@ class Microvm:
             jailer_param_list
     ):
         """Daemonize the jailer."""
-        if self.bin_cloner_path:
+        if self.bin_cloner_path and self.jailer.new_pid_ns is not True:
             cmd = [self.bin_cloner_path] + \
                 [self._jailer_binary_path] + \
                 jailer_param_list
@@ -665,9 +667,8 @@ class Microvm:
                 raise Exception(_p.stderr)
             self.jailer_clone_pid = int(_p.stdout.rstrip())
         else:
-            # This code path is not used at the moment, but I just feel
-            # it's nice to have a fallback mechanism in place, in case
-            # we decide to offload PID namespacing to the jailer.
+            # Fallback mechanism for when we offload PID namespacing
+            # to the jailer.
             _pid = os.fork()
             if _pid == 0:
                 os.execv(

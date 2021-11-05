@@ -4,10 +4,23 @@
 
 ### Added
 
-- Added `--http_api_max_payload_size` parameter to configure the maximum payload
+- Added `--http-api-max-payload-size` parameter to configure the maximum payload
   size for PUT and PATCH requests.
-- Limit MMDS data store size to `--http_api_max_payload_size`.
+- Limit MMDS data store size to `--http-api-max-payload-size`.
 - Cleanup all environment variables in Jailer.
+- Added metrics for accesses to deprecated HTTP and command line API endpoints.
+- Added permanent HTTP endpoint for `GET` on `/version` for getting the
+  Firecracker version.
+
+### Changed
+
+- Deprecated `vsock_id` body field in `PUT`s on `/vsock`.
+
+### Fixed
+
+- Fixed incorrect propagation of init parameters in kernel commandline.
+  Related to:
+  [#2709](https://github.com/firecracker-microvm/firecracker/issues/2709).
 
 ## [0.25.0]
 
