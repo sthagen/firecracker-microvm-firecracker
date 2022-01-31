@@ -71,27 +71,47 @@ mod tests {
         assert!(parse_put_mmds(&Body::new(invalid_body), None).is_err());
         assert!(METRICS.put_api_requests.mmds_fails.count() > 0);
 
+        // Test `config` path.
         let body = r#"{
-                "ipv4_address": "169.254.170.2"
+                "version": "V2",
+                "ipv4_address": "169.254.170.2",
+                "network_interfaces": []
               }"#;
-        let path = "config";
-        assert!(parse_put_mmds(&Body::new(body), Some(&path)).is_ok());
+        let config_path = "config";
+        assert!(parse_put_mmds(&Body::new(body), Some(&config_path)).is_ok());
 
         let body = r#"{
-                "ipv4_address": ""
+                "network_interfaces": []
               }"#;
-        assert!(parse_put_mmds(&Body::new(body), Some(&path)).is_err());
+        let config_path = "config";
+        assert!(parse_put_mmds(&Body::new(body), Some(&config_path)).is_ok());
 
-        // Equivalent to reset the mmds configuration.
-        let empty_body = r#"{}"#;
-        assert!(parse_put_mmds(&Body::new(empty_body), Some(&path)).is_ok());
+        let body = r#"{
+                "version": "foo",
+                "ipv4_address": "169.254.170.2",
+                "network_interfaces": []
+              }"#;
+        let config_path = "config";
+        assert!(parse_put_mmds(&Body::new(body), Some(&config_path)).is_err());
+
+        let body = r#"{
+                "version": "V2"
+              }"#;
+        let config_path = "config";
+        assert!(parse_put_mmds(&Body::new(body), Some(&config_path)).is_err());
+
+        let body = r#"{
+                "ipv4_address": "",
+                "network_interfaces": []
+              }"#;
+        assert!(parse_put_mmds(&Body::new(body), Some(&config_path)).is_err());
 
         let invalid_config_body = r#"{
                 "invalid_config": "invalid_value"
               }"#;
-        assert!(parse_put_mmds(&Body::new(invalid_config_body), Some(&path)).is_err());
+        assert!(parse_put_mmds(&Body::new(invalid_config_body), Some(&config_path)).is_err());
         assert!(parse_put_mmds(&Body::new(body), Some(&"invalid_path")).is_err());
-        assert!(parse_put_mmds(&Body::new(invalid_body), Some(&path)).is_err());
+        assert!(parse_put_mmds(&Body::new(invalid_body), Some(&config_path)).is_err());
     }
 
     #[test]

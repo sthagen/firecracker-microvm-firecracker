@@ -104,7 +104,7 @@ def _check_cache_topology_arm(test_microvm, no_cpus):
 
             for cache_file in cache_files:
                 absolute_cache_file = os.path.join(cache_path, cache_file)
-                with open(absolute_cache_file, 'r') as file:
+                with open(absolute_cache_file, 'r', encoding='utf-8') as file:
                     host_val = file.readline().strip()
                     host_dict[str(absolute_cache_file)] = str(host_val)
     assert guest_dict == host_dict
@@ -130,7 +130,7 @@ def test_cpu_topology(test_microvm_with_api, network_config, num_vcpus, htt):
     """
     vm = test_microvm_with_api
     vm.spawn()
-    vm.basic_config(vcpu_count=num_vcpus, ht_enabled=htt)
+    vm.basic_config(vcpu_count=num_vcpus, smt=htt)
     _tap, _, _ = vm.ssh_network_config(network_config, '1')
     vm.start()
 
@@ -152,9 +152,11 @@ def test_cache_topology(test_microvm_with_api, network_config, num_vcpus, htt):
 
     @type: functional
     """
+    if htt and PLATFORM == 'aarch64':
+        pytest.skip("SMT is configurable only on x86.")
     vm = test_microvm_with_api
     vm.spawn()
-    vm.basic_config(vcpu_count=num_vcpus, ht_enabled=htt)
+    vm.basic_config(vcpu_count=num_vcpus, smt=htt)
     _tap, _, _ = vm.ssh_network_config(network_config, '1')
     vm.start()
     if PLATFORM == "x86_64":

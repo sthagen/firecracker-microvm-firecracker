@@ -8,7 +8,7 @@
 pub use vm_memory_upstream::{
     address, bitmap::Bitmap, mmap::MmapRegionBuilder, mmap::MmapRegionError, Address, ByteValued,
     Bytes, Error, FileOffset, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryRegion,
-    GuestUsize, MemoryRegionAddress,
+    GuestUsize, MemoryRegionAddress, MmapRegion, VolatileMemory, VolatileMemoryError,
 };
 
 use std::io::Error as IoError;
@@ -16,14 +16,10 @@ use std::os::unix::io::AsRawFd;
 
 use vm_memory_upstream::bitmap::AtomicBitmap;
 use vm_memory_upstream::mmap::{check_file_offset, NewBitmap};
-use vm_memory_upstream::{
-    GuestMemoryMmap as UpstreamGuestMemoryMmap, GuestRegionMmap as UpstreamGuestRegionMmap,
-    MmapRegion as UpstreamMmapRegion,
-};
 
-pub type GuestMemoryMmap = UpstreamGuestMemoryMmap<Option<AtomicBitmap>>;
-pub type GuestRegionMmap = UpstreamGuestRegionMmap<Option<AtomicBitmap>>;
-pub type MmapRegion = UpstreamMmapRegion<Option<AtomicBitmap>>;
+pub type GuestMemoryMmap = vm_memory_upstream::GuestMemoryMmap<Option<AtomicBitmap>>;
+pub type GuestRegionMmap = vm_memory_upstream::GuestRegionMmap<Option<AtomicBitmap>>;
+pub type GuestMmapRegion = vm_memory_upstream::MmapRegion<Option<AtomicBitmap>>;
 
 const GUARD_PAGE_COUNT: usize = 1;
 
@@ -46,7 +42,7 @@ fn build_guarded_region(
     prot: i32,
     flags: i32,
     track_dirty_pages: bool,
-) -> Result<MmapRegion, MmapRegionError> {
+) -> Result<GuestMmapRegion, MmapRegionError> {
     let page_size = utils::get_page_size().expect("Cannot retrieve page size.");
     // Create the guarded range size (received size + X pages),
     // where X is defined as a constant GUARD_PAGE_COUNT.
@@ -131,6 +127,15 @@ pub fn create_guest_memory(
     }
 
     GuestMemoryMmap::from_regions(mmap_regions)
+}
+
+pub fn mark_dirty_mem(mem: &GuestMemoryMmap, addr: GuestAddress, len: usize) {
+    let _ = mem.try_access(len, addr, |_total, count, caddr, region| {
+        if let Some(bitmap) = region.bitmap() {
+            bitmap.mark_dirty(caddr.0 as usize, count);
+        }
+        Ok(count)
+    });
 }
 
 pub mod test_utils {
@@ -232,7 +237,7 @@ mod tests {
         };
     }
 
-    fn validate_guard_region(region: &MmapRegion) {
+    fn validate_guard_region(region: &GuestMmapRegion) {
         let page_size = get_page_size().unwrap();
 
         // Check that the created range allows us to write inside it
@@ -254,7 +259,7 @@ mod tests {
         fork_and_run(&|| AddrOp::Write.apply_on_addr(right_border), true);
     }
 
-    fn loop_guard_region_to_sigsegv(region: &MmapRegion) {
+    fn loop_guard_region_to_sigsegv(region: &GuestMmapRegion) {
         let page_size = get_page_size().unwrap();
         let right_page_guard = region.as_ptr() as usize + region.size();
 
@@ -380,6 +385,57 @@ mod tests {
             guest_memory.iter().for_each(|region| {
                 assert!(region.bitmap().is_some());
             });
+        }
+    }
+
+    #[test]
+    fn test_mark_dirty_mem() {
+        let page_size = utils::get_page_size().unwrap();
+        let region_size = page_size * 3;
+
+        let regions = vec![
+            (None, GuestAddress(0), region_size), // pages 0-2
+            (None, GuestAddress(region_size as u64), region_size), // pages 3-5
+            (None, GuestAddress(region_size as u64 * 2), region_size), // pages 6-8
+        ];
+        let guest_memory = create_guest_memory(&regions, true).unwrap();
+
+        let dirty_map = [
+            // page 0: not dirty
+            (0, page_size, false),
+            // pages 1-2: dirty range in one region
+            (page_size, page_size * 2, true),
+            // page 3: not dirty
+            (page_size * 3, page_size, false),
+            // pages 4-7: dirty range across 2 regions,
+            (page_size * 4, page_size * 4, true),
+            // page 8: not dirty
+            (page_size * 8, page_size, false),
+        ];
+
+        // Mark dirty memory
+        for (addr, len, dirty) in &dirty_map {
+            if *dirty {
+                mark_dirty_mem(&guest_memory, GuestAddress(*addr as u64), *len);
+            }
+        }
+
+        // Check that the dirty memory was set correctly
+        for (addr, len, dirty) in &dirty_map {
+            guest_memory
+                .try_access(
+                    *len,
+                    GuestAddress(*addr as u64),
+                    |_total, count, caddr, region| {
+                        let offset = caddr.0 as usize;
+                        let bitmap = region.bitmap().as_ref().unwrap();
+                        for i in offset..offset + count {
+                            assert_eq!(bitmap.dirty_at(i), *dirty);
+                        }
+                        Ok(count)
+                    },
+                )
+                .unwrap();
         }
     }
 }

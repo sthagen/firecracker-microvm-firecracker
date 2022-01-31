@@ -1,7 +1,6 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#![deny(missing_docs)]
 //! Utility for sending log related messages to a storing destination or simply to stdout/stderr.
 //! The logging destination is specified upon the initialization of the logging system.
 //!
@@ -21,7 +20,7 @@
 //! ## Example for logging to stdout/stderr
 //!
 //! ```
-//! use logger::{warn, error, LOGGER};
+//! use logger::{error, warn, LOGGER};
 //! use std::ops::Deref;
 //!
 //! // Optionally do an initial configuration for the logger.
@@ -36,17 +35,14 @@
 //!
 //! ```
 //! use libc::c_char;
+//! use logger::{error, warn, LOGGER};
 //! use std::io::Cursor;
-//! use logger::{warn, error, LOGGER};
 //!
 //! let mut logs = Cursor::new(vec![0; 15]);
 //!
 //! // Initialize the logger to log to a FIFO that was created beforehand.
 //! assert!(LOGGER
-//!     .init(
-//!         "Running Firecracker v.x".to_string(),
-//!         Box::new(logs),
-//!     )
+//!     .init("Running Firecracker v.x".to_string(), Box::new(logs),)
 //!     .is_ok());
 //! // The following messages should appear in the in-memory buffer `logs`.
 //! warn!("this is a warning");
@@ -306,9 +302,9 @@ impl Logger {
     /// use std::ops::Deref;
     ///
     /// LOGGER
-    ///    .deref()
-    ///    .configure(Some("MY-INSTANCE".to_string()))
-    ///    .unwrap();
+    ///     .deref()
+    ///     .configure(Some("MY-INSTANCE".to_string()))
+    ///     .unwrap();
     /// ```
     pub fn configure(&self, instance_id: Option<String>) -> Result<()> {
         self.init
@@ -342,10 +338,7 @@ impl Logger {
     ///
     /// let mut logs = Cursor::new(vec![0; 15]);
     ///
-    /// LOGGER.init(
-    ///     "Running Firecracker v.x".to_string(),
-    ///     Box::new(logs),
-    /// );
+    /// LOGGER.init("Running Firecracker v.x".to_string(), Box::new(logs));
     /// ```
     pub fn init(&self, header: String, log_dest: Box<dyn Write + Send>) -> Result<()> {
         self.init

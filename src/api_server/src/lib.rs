@@ -11,7 +11,7 @@ mod request;
 
 use serde_json::json;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::{fmt, io};
 
 use crate::parsed_request::{ParsedRequest, RequestAction};
@@ -109,16 +109,16 @@ impl ApiServer {
     /// # Example
     ///
     /// ```
-    /// use mmds::MAX_DATA_STORE_SIZE;
     /// use api_server::ApiServer;
+    /// use logger::ProcessTimeReporter;
+    /// use mmds::MAX_DATA_STORE_SIZE;
     /// use mmds::MMDS;
+    /// use std::env::consts::ARCH;
     /// use std::{
     ///     convert::TryInto, io::Read, io::Write, os::unix::net::UnixStream, path::PathBuf,
     ///     sync::mpsc::channel, thread, time::Duration,
     /// };
-    /// use std::env::consts::ARCH;
     /// use utils::{eventfd::EventFd, tempfile::TempFile};
-    /// use logger::ProcessTimeReporter;
     /// use vmm::rpc_interface::VmmData;
     /// use vmm::seccomp_filters::{get_filters, SeccompConfig};
     /// use vmm::vmm_config::instance_info::InstanceInfo;
@@ -314,28 +314,26 @@ impl ApiServer {
         response
     }
 
+    fn unlock_mmds(&self) -> MutexGuard<'_, Mmds> {
+        self.mmds_info
+            .lock()
+            .expect("Failed to acquire lock on MMDS info")
+    }
+
     fn get_mmds(&self) -> Response {
-        ApiServer::json_response(
-            StatusCode::OK,
-            self.mmds_info
-                .lock()
-                .expect("Failed to acquire lock on MMDS info")
-                .get_data_str(),
-        )
+        let data = self.unlock_mmds().get_data_str();
+        ApiServer::json_response(StatusCode::OK, data)
     }
 
     fn patch_mmds(&self, value: serde_json::Value) -> Response {
-        let mmds_response = self
-            .mmds_info
-            .lock()
-            .expect("Failed to acquire lock on MMDS info")
-            .patch_data(value);
+        let mmds_response = self.unlock_mmds().patch_data(value);
 
         match mmds_response {
             Ok(_) => Response::new(Version::Http11, StatusCode::NoContent),
             Err(e) => match e {
-                data_store::Error::NotFound => unreachable!(),
-                data_store::Error::UnsupportedValueType => unreachable!(),
+                data_store::Error::NotFound
+                | data_store::Error::UnsupportedValueType
+                | data_store::Error::TokenAuthority(_) => unreachable!(),
                 data_store::Error::NotInitialized => ApiServer::json_response(
                     StatusCode::BadRequest,
                     ApiServer::json_fault_message(e.to_string()),
@@ -349,18 +347,8 @@ impl ApiServer {
     }
 
     fn put_mmds(&self, value: serde_json::Value) -> Response {
-        let mmds_response = self
-            .mmds_info
-            .lock()
-            .expect("Failed to acquire lock on MMDS info")
-            .put_data(value);
-        match mmds_response {
-            Ok(_) => Response::new(Version::Http11, StatusCode::NoContent),
-            Err(e) => ApiServer::json_response(
-                StatusCode::BadRequest,
-                ApiServer::json_fault_message(e.to_string()),
-            ),
-        }
+        self.unlock_mmds().put_data(value);
+        Response::new(Version::Http11, StatusCode::NoContent)
     }
 
     /// An HTTP response which also includes a body.

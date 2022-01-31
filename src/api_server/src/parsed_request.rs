@@ -138,7 +138,7 @@ impl ParsedRequest {
         }
     }
 
-    fn success_response_with_data<T>(body_data: &T) -> Response
+    pub(crate) fn success_response_with_data<T>(body_data: &T) -> Response
     where
         T: ?Sized + Serialize,
     {
@@ -337,6 +337,7 @@ pub(crate) mod tests {
                 (RequestAction::PatchMMDS(ref val), RequestAction::PatchMMDS(ref other_val)) => {
                     val == other_val
                 }
+
                 _ => false,
             }
         }
@@ -741,6 +742,7 @@ pub(crate) mod tests {
             \"partuuid\": \"string\", \
             \"is_read_only\": true, \
             \"cache_type\": \"Unsafe\", \
+            \"io_engine\": \"Sync\", \
             \"rate_limiter\": { \
                 \"bandwidth\": { \
                     \"size\": 0, \
@@ -786,8 +788,7 @@ pub(crate) mod tests {
         let mut connection = HttpConnection::new(receiver);
         let body = "{ \
             \"vcpu_count\": 0, \
-            \"mem_size_mib\": 0, \
-            \"ht_enabled\": true \
+            \"mem_size_mib\": 0 \
         }";
         sender
             .write_all(http_request("PUT", "/machine-config", Some(&body)).as_bytes())
@@ -816,15 +817,30 @@ pub(crate) mod tests {
     fn test_try_from_put_mmds() {
         let (mut sender, receiver) = UnixStream::pair().unwrap();
         let mut connection = HttpConnection::new(receiver);
+
+        // `/mmds`
         sender
             .write_all(http_request("PUT", "/mmds", Some(&"{}")).as_bytes())
             .unwrap();
         assert!(connection.try_read().is_ok());
         let req = connection.pop_parsed_request().unwrap();
         assert!(ParsedRequest::try_from_request(&req).is_ok());
-        let body = "{\"ipv4_address\":\"169.254.170.2\"}";
+
+        let body = "{\"foo\":\"bar\"}";
         sender
             .write_all(http_request("PUT", "/mmds", Some(&body)).as_bytes())
+            .unwrap();
+        assert!(connection.try_read().is_ok());
+        let req = connection.pop_parsed_request().unwrap();
+        assert!(ParsedRequest::try_from_request(&req).is_ok());
+
+        // `/mmds/config`
+        let body = "{ \
+            \"ipv4_address\": \"169.254.170.2\", \
+            \"network_interfaces\": [\"iface0\"] \
+        }";
+        sender
+            .write_all(http_request("PUT", "/mmds/config", Some(&body)).as_bytes())
             .unwrap();
         assert!(connection.try_read().is_ok());
         let req = connection.pop_parsed_request().unwrap();
@@ -839,7 +855,6 @@ pub(crate) mod tests {
             \"iface_id\": \"string\", \
             \"guest_mac\": \"12:34:56:78:9a:BC\", \
             \"host_dev_name\": \"string\", \
-            \"allow_mmds_requests\": true, \
             \"rx_rate_limiter\": { \
                 \"bandwidth\": { \
                     \"size\": 0, \
@@ -993,8 +1008,7 @@ pub(crate) mod tests {
         let mut connection = HttpConnection::new(receiver);
         let body = "{ \
             \"vcpu_count\": 0, \
-            \"mem_size_mib\": 0, \
-            \"ht_enabled\": true \
+            \"mem_size_mib\": 0 \
         }";
         sender
             .write_all(http_request("PATCH", "/machine-config", Some(&body)).as_bytes())
@@ -1005,7 +1019,7 @@ pub(crate) mod tests {
         let body = "{ \
             \"vcpu_count\": 0, \
             \"mem_size_mib\": 0, \
-            \"ht_enabled\": true, \
+            \"smt\": false, \
             \"cpu_template\": \"C3\" \
         }";
         sender

@@ -31,6 +31,26 @@
                 "syscall": "close"
             },
             {
+                "syscall": "uname",
+                "comment": "Used for getting the kernel version, for validating io_uring support"
+            },
+            {
+                "syscall": "eventfd2",
+                "comment": "Used for creating io_uring completion event, on drive patch"
+            },
+            {
+                "syscall": "io_uring_enter",
+                "comment": "Used for submitting io_uring requests"
+            },
+            {
+                "syscall": "io_uring_setup",
+                "comment": "Used on drive patch"
+            },
+            {
+                "syscall": "io_uring_register",
+                "comment": "Used on drive patch"
+            },
+            {
                 "syscall": "brk",
                 "comment": "Called for expanding the heap"
             },
@@ -199,6 +219,32 @@
                         "op": "eq",
                         "val": 1,
                         "comment": "libc::MAP_SHARED"
+                    }
+                ]
+            },
+            {
+                "syscall": "mmap",
+                "comment": "Used by rust's stdlib, particularly when creating a diff snapshot of a VM with ~16 GB of memory",
+                "args": [
+                    {
+                        "index": 3,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 34,
+                        "comment": "libc::MAP_ANONYMOUS | libc::MAP_PRIVATE"
+                    }
+                ]
+            },
+            {
+                "syscall": "mmap",
+                "comment": "Used by io_uring for mapping the queues",
+                "args": [
+                    {
+                        "index": 3,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 32769,
+                        "comment": "libc::MAP_SHARED | libc::MAP_POPULATE"
                     }
                 ]
             },
@@ -459,6 +505,19 @@
                 ]
             },
             {
+                "syscall": "fcntl",
+                "comment": "Used by MMDS version 2 to extract entropy",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 2,
+                        "comment": "FCNTL_F_SETFD"
+                    }
+                ]
+            },
+            {
                 "syscall": "futex",
                 "comment": "Used for synchronization (during thread teardown)",
                 "args": [
@@ -532,7 +591,7 @@
                         "type": "dword",
                         "op": "eq",
                         "val": 34,
-                        "comment": " libc::MAP_ANONYMOUS | libc::MAP_PRIVATE"
+                        "comment": "libc::MAP_ANONYMOUS | libc::MAP_PRIVATE"
                     }
                 ]
             },

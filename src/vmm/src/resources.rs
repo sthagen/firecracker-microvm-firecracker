@@ -1,8 +1,6 @@
 // Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#![deny(warnings)]
-
 use crate::vmm_config::balloon::*;
 use crate::vmm_config::boot_source::{BootConfig, BootSourceConfig, BootSourceConfigError};
 use crate::vmm_config::drive::*;
@@ -17,6 +15,8 @@ use crate::vstate::vcpu::VcpuConfig;
 use mmds::ns::MmdsNetworkStack;
 use utils::net::ipv4addr::is_link_local_valid;
 
+use mmds::data_store::MmdsVersion;
+use mmds::MMDS;
 use serde::{Deserialize, Serialize};
 use std::convert::From;
 
@@ -45,6 +45,23 @@ pub enum Error {
     VmConfig(VmConfigError),
     /// Vsock device configuration error.
     VsockDevice(VsockConfigError),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::BalloonDevice(e) => write!(f, "Balloon device error: {}", e),
+            Error::BlockDevice(e) => write!(f, "Block device error: {}", e),
+            Error::BootSource(e) => write!(f, "Boot source error: {}", e),
+            Error::InvalidJson(e) => write!(f, "Invalid JSON: {}", e),
+            Error::Logger(e) => write!(f, "Logger error: {}", e),
+            Error::Metrics(e) => write!(f, "Metrics error: {}", e),
+            Error::MmdsConfig(e) => write!(f, "MMDS config error: {}", e),
+            Error::NetDevice(e) => write!(f, "Network device error: {}", e),
+            Error::VmConfig(e) => write!(f, "VM config error: {}", e),
+            Error::VsockDevice(e) => write!(f, "Vsock device error: {}", e),
+        }
+    }
 }
 
 /// Used for configuring a vmm from one single json passed to the Firecracker process.
@@ -146,7 +163,7 @@ impl VmResources {
 
         if let Some(mmds_config) = vmm_config.mmds_config {
             resources
-                .set_mmds_config(mmds_config)
+                .set_mmds_config(mmds_config, &instance_info.id)
                 .map_err(Error::MmdsConfig)?;
         }
 
@@ -159,7 +176,7 @@ impl VmResources {
         // supplied by the user.
         VcpuConfig {
             vcpu_count: self.vm_config().vcpu_count.unwrap(),
-            ht_enabled: self.vm_config().ht_enabled.unwrap(),
+            smt: self.vm_config().smt.unwrap(),
             cpu_template: self.vm_config().cpu_template,
         }
     }
@@ -205,23 +222,23 @@ impl VmResources {
             return Err(VmConfigError::IncompatibleBalloonSize);
         }
 
-        let ht_enabled = machine_config
-            .ht_enabled
-            .unwrap_or_else(|| self.vm_config.ht_enabled.unwrap());
+        let smt = machine_config
+            .smt
+            .unwrap_or_else(|| self.vm_config.smt.unwrap());
 
         let vcpu_count_value = machine_config
             .vcpu_count
             .unwrap_or_else(|| self.vm_config.vcpu_count.unwrap());
 
-        // If hyperthreading is enabled or is to be enabled in this call
+        // If SMT is enabled or is to be enabled in this call
         // only allow vcpu count to be 1 or even.
-        if ht_enabled && vcpu_count_value > 1 && vcpu_count_value % 2 == 1 {
+        if smt && vcpu_count_value > 1 && vcpu_count_value % 2 == 1 {
             return Err(VmConfigError::InvalidVcpuCount);
         }
 
         // Update all the fields that have a new value.
         self.vm_config.vcpu_count = Some(vcpu_count_value);
-        self.vm_config.ht_enabled = Some(ht_enabled);
+        self.vm_config.smt = Some(smt);
         self.vm_config.track_dirty_pages = machine_config.track_dirty_pages;
 
         if machine_config.mem_size_mib.is_some() {
@@ -284,18 +301,8 @@ impl VmResources {
         &mut self,
         body: NetworkInterfaceConfig,
     ) -> Result<NetworkInterfaceError> {
-        self.net_builder.build(body).map(|net_device| {
-            // Update `Net` device `MmdsNetworkStack` IPv4 address.
-            match &self.mmds_config {
-                Some(cfg) => cfg.ipv4_addr().map_or((), |ipv4_addr| {
-                    net_device
-                        .lock()
-                        .expect("Poisoned lock")
-                        .set_mmds_ipv4_addr(ipv4_addr);
-                }),
-                None => (),
-            };
-        })
+        let _ = self.net_builder.build(body)?;
+        Ok(())
     }
 
     /// Sets a vsock device to be attached when the VM starts.
@@ -304,7 +311,42 @@ impl VmResources {
     }
 
     /// Setter for mmds config.
-    pub fn set_mmds_config(&mut self, config: MmdsConfig) -> Result<MmdsConfigError> {
+    pub fn set_mmds_config(
+        &mut self,
+        config: MmdsConfig,
+        instance_id: &str,
+    ) -> Result<MmdsConfigError> {
+        self.set_mmds_network_stack_config(&config)?;
+        self.set_mmds_version(config.version, instance_id)?;
+
+        self.mmds_config = Some(MmdsConfig {
+            version: config.version,
+            ipv4_address: config
+                .ipv4_addr()
+                .or_else(|| Some(MmdsNetworkStack::default_ipv4_addr())),
+            network_interfaces: config.network_interfaces,
+        });
+
+        Ok(())
+    }
+
+    // Updates MMDS version.
+    fn set_mmds_version(
+        &mut self,
+        version: MmdsVersion,
+        instance_id: &str,
+    ) -> Result<MmdsConfigError> {
+        let mut mmds_lock = MMDS.lock().expect("Failed to acquire lock on MMDS");
+        mmds_lock
+            .set_version(version)
+            .map_err(|e| MmdsConfigError::MmdsVersion(version, e))?;
+        mmds_lock.set_aad(instance_id);
+        Ok(())
+    }
+
+    // Updates MMDS Network Stack for network interfaces to allow forwarding
+    // requests to MMDS (or not).
+    fn set_mmds_network_stack_config(&mut self, config: &MmdsConfig) -> Result<MmdsConfigError> {
         // Check IPv4 address validity.
         let ipv4_addr = match config.ipv4_addr() {
             Some(ipv4_addr) if is_link_local_valid(ipv4_addr) => Ok(ipv4_addr),
@@ -312,15 +354,34 @@ impl VmResources {
             _ => Err(MmdsConfigError::InvalidIpv4Addr),
         }?;
 
-        // Update existing built network device `MmdsNetworkStack` IPv4 address.
-        for net_device in self.net_builder.iter_mut() {
-            net_device
-                .lock()
-                .expect("Poisoned lock")
-                .set_mmds_ipv4_addr(ipv4_addr);
+        let network_interfaces = config.network_interfaces();
+        // Ensure that at least one network ID is specified.
+        if network_interfaces.is_empty() {
+            return Err(MmdsConfigError::EmptyNetworkIfaceList);
         }
 
-        self.mmds_config = Some(config);
+        // Ensure all interface IDs specified correspond to existing net devices.
+        if !network_interfaces.iter().all(|id| {
+            self.net_builder
+                .iter()
+                .map(|device| device.lock().expect("Poisoned lock").id().clone())
+                .any(|x| &x == id)
+        }) {
+            return Err(MmdsConfigError::InvalidNetworkInterfaceId);
+        }
+
+        // Create `MmdsNetworkStack` and configure the IPv4 address for
+        // existing built network devices whose names are defined in the
+        // network interface ID list.
+        for net_device in self.net_builder.iter_mut() {
+            let mut net_device_lock = net_device.lock().expect("Poisoned lock");
+            if network_interfaces.contains(net_device_lock.id()) {
+                net_device_lock.configure_mmds_network_stack(ipv4_addr);
+            } else {
+                net_device_lock.disable_mmds_network_stack();
+            }
+        }
+
         Ok(())
     }
 }
@@ -354,13 +415,13 @@ mod tests {
     use super::*;
     use crate::resources::VmResources;
     use crate::vmm_config::boot_source::{BootConfig, BootSourceConfig, DEFAULT_KERNEL_CMDLINE};
-    use crate::vmm_config::drive::{BlockBuilder, BlockDeviceConfig};
+    use crate::vmm_config::drive::{BlockBuilder, BlockDeviceConfig, FileEngineType};
     use crate::vmm_config::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};
     use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig};
     use crate::vmm_config::vsock::tests::default_config;
     use crate::vmm_config::RateLimiterConfig;
     use crate::vstate::vcpu::VcpuConfig;
-    use devices::virtio::vsock::VSOCK_DEV_ID;
+    use devices::virtio::vsock::{VsockError, VSOCK_DEV_ID};
     use logger::{LevelFilter, LOGGER};
     use utils::net::mac::MacAddr;
     use utils::tempfile::TempFile;
@@ -378,7 +439,6 @@ mod tests {
             guest_mac: Some(MacAddr::parse_str("01:23:45:67:89:0a").unwrap()),
             rx_rate_limiter: Some(RateLimiterConfig::default()),
             tx_rate_limiter: Some(RateLimiterConfig::default()),
-            allow_mmds_requests: false,
         }
     }
 
@@ -400,6 +460,7 @@ mod tests {
                 cache_type: CacheType::Unsafe,
                 is_read_only: false,
                 rate_limiter: Some(RateLimiterConfig::default()),
+                file_engine_type: FileEngineType::default(),
             },
             tmp_file,
         )
@@ -527,7 +588,7 @@ mod tests {
         );
 
         match VmResources::from_json(json.as_str(), &default_instance_info) {
-            Err(Error::BlockDevice(DriveError::InvalidBlockDevicePath)) => (),
+            Err(Error::BlockDevice(DriveError::InvalidBlockDevicePath(_))) => (),
             _ => unreachable!(),
         }
 
@@ -548,8 +609,7 @@ mod tests {
                     ],
                     "machine-config": {{
                         "vcpu_count": 0,
-                        "mem_size_mib": 1024,
-                        "ht_enabled": false
+                        "mem_size_mib": 1024
                     }}
             }}"#,
             kernel_file.as_path().to_str().unwrap(),
@@ -578,8 +638,7 @@ mod tests {
                     ],
                     "machine-config": {{
                         "vcpu_count": 2,
-                        "mem_size_mib": 0,
-                        "ht_enabled": false
+                        "mem_size_mib": 0
                     }}
             }}"#,
             kernel_file.as_path().to_str().unwrap(),
@@ -707,17 +766,18 @@ mod tests {
                     "network-interfaces": [
                         {{
                             "iface_id": "netif",
-                            "host_dev_name": "hostname8",
-                            "allow_mmds_requests": true
+                            "host_dev_name": "hostname8"
                         }}
                     ],
                     "machine-config": {{
                         "vcpu_count": 2,
                         "mem_size_mib": 1024,
-                        "ht_enabled": false
+                        "smt": false
                     }},
                     "mmds-config": {{
-                        "ipv4_address": "169.254.170.2"
+                        "version": "V2",
+                        "ipv4_address": "169.254.170.2",
+                        "network_interfaces": ["netif"]
                     }}
             }}"#,
             kernel_file.as_path().to_str().unwrap(),
@@ -725,9 +785,8 @@ mod tests {
         );
         assert!(VmResources::from_json(json.as_str(), &default_instance_info).is_ok());
 
-        // Test all configuration, this time trying to configure the MMDS with an
-        // empty body. It will make it access the code path in which it sets the
-        // default MMDS configuration.
+        // Test all configuration, this time trying to set default configuration
+        // for version and IPv4 address.
         let kernel_file = TempFile::new().unwrap();
         json = format!(
             r#"{{
@@ -751,16 +810,17 @@ mod tests {
                     "network-interfaces": [
                         {{
                             "iface_id": "netif",
-                            "host_dev_name": "hostname9",
-                            "allow_mmds_requests": true
+                            "host_dev_name": "hostname9"
                         }}
                     ],
                     "machine-config": {{
                         "vcpu_count": 2,
                         "mem_size_mib": 1024,
-                        "ht_enabled": false
+                        "smt": false
                     }},
-                    "mmds-config": {{}}
+                    "mmds-config": {{
+                        "network_interfaces": ["netif"]
+                    }}
             }}"#,
             kernel_file.as_path().to_str().unwrap(),
             rootfs_file.as_path().to_str().unwrap(),
@@ -773,7 +833,7 @@ mod tests {
         let vm_resources = default_vm_resources();
         let expected_vcpu_config = VcpuConfig {
             vcpu_count: vm_resources.vm_config().vcpu_count.unwrap(),
-            ht_enabled: vm_resources.vm_config().ht_enabled.unwrap(),
+            smt: vm_resources.vm_config().smt.unwrap(),
             cpu_template: vm_resources.vm_config().cpu_template,
         };
 
@@ -795,7 +855,7 @@ mod tests {
         let mut aux_vm_config = VmConfig {
             vcpu_count: Some(32),
             mem_size_mib: Some(512),
-            ht_enabled: Some(true),
+            smt: Some(true),
             cpu_template: Some(CpuFeaturesTemplate::T2),
             track_dirty_pages: false,
         };
@@ -980,5 +1040,107 @@ mod tests {
 
         vm_resources.build_net_device(new_net_device_cfg).unwrap();
         assert_eq!(vm_resources.net_builder.len(), 2);
+    }
+
+    #[test]
+    fn test_error_display() {
+        assert_eq!(
+            format!(
+                "{}",
+                Error::BalloonDevice(BalloonConfigError::DeviceNotActive)
+            ),
+            format!(
+                "Balloon device error: {}",
+                BalloonConfigError::DeviceNotActive
+            )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::BlockDevice(DriveError::InvalidBlockDevicePath(String::from("path")))
+            ),
+            format!(
+                "Block device error: {}",
+                DriveError::InvalidBlockDevicePath(String::from("path"))
+            )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::BootSource(BootSourceConfigError::InvalidKernelPath(
+                    std::io::Error::from_raw_os_error(21)
+                ))
+            ),
+            format!(
+                "Boot source error: {}",
+                BootSourceConfigError::InvalidKernelPath(std::io::Error::from_raw_os_error(21))
+            )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::InvalidJson(serde_json::Error::io(std::io::Error::from_raw_os_error(21)))
+            ),
+            format!(
+                "Invalid JSON: {}",
+                serde_json::Error::io(std::io::Error::from_raw_os_error(21))
+            )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::Logger(LoggerConfigError::InitializationFailure(
+                    "error message".to_string()
+                ))
+            ),
+            format!(
+                "Logger error: {}",
+                LoggerConfigError::InitializationFailure("error message".to_string())
+            )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::Metrics(MetricsConfigError::InitializationFailure(
+                    "error message".to_string()
+                ))
+            ),
+            format!(
+                "Metrics error: {}",
+                MetricsConfigError::InitializationFailure("error message".to_string())
+            )
+        );
+        assert_eq!(
+            format!("{}", Error::MmdsConfig(MmdsConfigError::InvalidIpv4Addr)),
+            format!("MMDS config error: {}", MmdsConfigError::InvalidIpv4Addr)
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::NetDevice(NetworkInterfaceError::GuestMacAddressInUse(
+                    "MAC".to_string()
+                ))
+            ),
+            format!(
+                "Network device error: {}",
+                NetworkInterfaceError::GuestMacAddressInUse("MAC".to_string())
+            )
+        );
+        assert_eq!(
+            format!("{}", Error::VmConfig(VmConfigError::InvalidMemorySize)),
+            format!("VM config error: {}", VmConfigError::InvalidMemorySize)
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::VsockDevice(VsockConfigError::CreateVsockDevice(
+                    VsockError::BufDescTooSmall
+                ))
+            ),
+            format!(
+                "Vsock device error: {}",
+                VsockConfigError::CreateVsockDevice(VsockError::BufDescTooSmall)
+            )
+        );
     }
 }

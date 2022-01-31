@@ -528,6 +528,8 @@ pub fn build_microvm_from_snapshot(
         MMIODeviceManager::restore(mmio_ctor_args, &microvm_state.device_states)
             .map_err(MicrovmStateError::RestoreDevices)
             .map_err(RestoreMicrovmState)?;
+    vmm.emulate_serial_init()
+        .map_err(StartMicrovmError::Internal)?;
 
     // Move vcpus to their own threads and start their state machine in the 'Paused' state.
     vmm.start_vcpus(
@@ -974,7 +976,7 @@ pub mod tests {
     use super::*;
     use crate::vmm_config::balloon::{BalloonBuilder, BalloonDeviceConfig, BALLOON_DEV_ID};
     use crate::vmm_config::boot_source::DEFAULT_KERNEL_CMDLINE;
-    use crate::vmm_config::drive::{BlockBuilder, BlockDeviceConfig, CacheType};
+    use crate::vmm_config::drive::{BlockBuilder, BlockDeviceConfig, CacheType, FileEngineType};
     use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig};
     use crate::vmm_config::vsock::tests::default_config;
     use crate::vmm_config::vsock::{VsockBuilder, VsockDeviceConfig};
@@ -1101,6 +1103,7 @@ pub mod tests {
                 is_read_only: custom_block_cfg.is_read_only,
                 cache_type: custom_block_cfg.cache_type,
                 rate_limiter: None,
+                file_engine_type: FileEngineType::default(),
             };
             block_dev_configs.insert(block_device_config).unwrap();
         }
@@ -1272,7 +1275,6 @@ pub mod tests {
             guest_mac: None,
             rx_rate_limiter: None,
             tx_rate_limiter: None,
-            allow_mmds_requests: true,
         };
 
         let mut cmdline = default_kernel_cmdline();

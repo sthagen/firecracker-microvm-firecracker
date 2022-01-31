@@ -9,7 +9,7 @@ from host_tools.cargo_build import get_firecracker_binaries
 from conftest import _test_images_s3_bucket
 from framework.artifacts import ArtifactCollection
 from framework.builder import MicrovmBuilder, SnapshotBuilder, SnapshotType
-from framework.utils import get_firecracker_version_from_toml, run_cmd
+from framework.utils import run_cmd, get_firecracker_version_from_toml
 
 
 def test_describe_snapshot_all_versions(bin_cloner_path):
@@ -24,6 +24,7 @@ def test_describe_snapshot_all_versions(bin_cloner_path):
     # Fetch all firecracker binaries.
     # For each binary create a snapshot and verify the data version
     # of the snapshot state file.
+
     firecracker_artifacts = artifacts.firecrackers(
         max_version=get_firecracker_version_from_toml())
 

@@ -4,9 +4,8 @@
 
 import os
 import platform
-import pytest
 
-import framework.utils as utils
+from framework import utils
 
 import host_tools.drive as drive_tools
 import host_tools.network as net_tools  # pylint: disable=import-error
@@ -114,17 +113,14 @@ def test_device_ordering(test_microvm_with_api, network_config):
     test_microvm.start()
 
     # Determine the size of the microVM rootfs in bytes.
-    try:
-        result = utils.run_cmd(
-            'du --apparent-size --block-size=1 {}'
-            .format(test_microvm.rootfs_file),
-        )
-    except ChildProcessError:
-        pytest.skip('Failed to get microVM rootfs size: {}'
-                    .format(result.stderr))
+    rc, stdout, stderr = utils.run_cmd(
+        'du --apparent-size --block-size=1 {}'
+        .format(test_microvm.rootfs_file),
+    )
+    assert rc == 0, f"Failed to get microVM rootfs size: {stderr}"
 
-    assert len(result.stdout.split()) == 2
-    rootfs_size = result.stdout.split('\t')[0]
+    assert len(stdout.split()) == 2
+    rootfs_size = stdout.split('\t')[0]
 
     # The devices were added in this order: fs1, rootfs, fs2.
     # However, the rootfs is the root device and goes first,
@@ -172,14 +168,9 @@ def test_rescan_dev(test_microvm_with_api, network_config):
     )
 
     losetup = ['losetup', '--find', '--show', fs2.path]
-    loopback_device = None
-    result = None
-    try:
-        result = utils.run_cmd(losetup)
-        loopback_device = result.stdout.rstrip()
-    except ChildProcessError:
-        pytest.skip('failed to create a lookback device: ' +
-                    f'stdout={result.stdout}, stderr={result.stderr}')
+    rc, stdout, _ = utils.run_cmd(losetup)
+    assert rc == 0
+    loopback_device = stdout.rstrip()
 
     try:
         response = test_microvm.drive.patch(
@@ -500,9 +491,9 @@ def test_block_default_cache_old_version(test_microvm_with_api):
     # We should find a warning in the logs for this case as this
     # cache type was not supported in 0.24.0 and we should default
     # to "Unsafe" mode.
-    log_data = test_microvm.log_data
-    assert "Target version does not implement the current cache type. "\
-        "Defaulting to \"unsafe\" mode." in log_data
+    test_microvm.check_log_message("Target version does not implement the"
+                                   " current cache type. "
+                                   "Defaulting to \"unsafe\" mode.")
 
 
 def check_iops_limit(ssh_connection, block_size, count, min_time, max_time):
@@ -576,9 +567,9 @@ def test_patch_drive_limiter(test_microvm_with_api, network_config):
     # Validate IOPS stays within above configured limits.
     # For example, the below call will validate that reading 1000 blocks
     # of 512b will complete in at 0.8-1.2 seconds ('dd' is not very accurate,
-    # so we target to stay within 25% error).
-    check_iops_limit(ssh_connection, 512, 1000, 0.75, 1.25)
-    check_iops_limit(ssh_connection, 4096, 1000, 0.75, 1.25)
+    # so we target to stay within 30% error).
+    check_iops_limit(ssh_connection, 512, 1000, 0.7, 1.3)
+    check_iops_limit(ssh_connection, 4096, 1000, 0.7, 1.3)
 
     # Patch ratelimiter
     response = test_microvm.drive.patch(
@@ -596,8 +587,8 @@ def test_patch_drive_limiter(test_microvm_with_api, network_config):
     )
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
-    check_iops_limit(ssh_connection, 512, 2000, 0.75, 1.25)
-    check_iops_limit(ssh_connection, 4096, 2000, 0.75, 1.25)
+    check_iops_limit(ssh_connection, 512, 2000, 0.7, 1.3)
+    check_iops_limit(ssh_connection, 4096, 2000, 0.7, 1.3)
 
     # Patch ratelimiter
     response = test_microvm.drive.patch(
@@ -611,8 +602,8 @@ def test_patch_drive_limiter(test_microvm_with_api, network_config):
     )
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
-    check_iops_limit(ssh_connection, 512, 10000, 0.75, 1.25)
-    check_iops_limit(ssh_connection, 4096, 10000, 0.75, 1.25)
+    check_iops_limit(ssh_connection, 512, 10000, 0.7, 1.3)
+    check_iops_limit(ssh_connection, 4096, 10000, 0.7, 1.3)
 
 
 def _check_block_size(ssh_connection, dev_path, size):

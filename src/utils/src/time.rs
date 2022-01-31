@@ -5,6 +5,8 @@ use std::fmt;
 
 /// Constant to convert seconds to nanoseconds.
 pub const NANOS_PER_SECOND: u64 = 1_000_000_000;
+/// Constant to convert milliseconds to nanoseconds.
+pub const NANOS_PER_MILLISECOND: u64 = 1_000_000;
 
 /// Wrapper over `libc::clockid_t` to specify Linux Kernel clock source.
 pub enum ClockType {
@@ -160,6 +162,15 @@ pub fn get_time_us(clock_type: ClockType) -> u64 {
     get_time_ns(clock_type) / 1000
 }
 
+/// Returns a timestamp in milliseconds based on the provided clock type.
+///
+/// # Arguments
+///
+/// * `clock_type` - Identifier of the Linux Kernel clock on which to act.
+pub fn get_time_ms(clock_type: ClockType) -> u64 {
+    get_time_ns(clock_type) / NANOS_PER_MILLISECOND
+}
+
 /// Converts a timestamp in seconds to an equivalent one in nanoseconds.
 /// Returns `None` if the conversion overflows.
 ///
@@ -191,6 +202,9 @@ mod tests {
         assert_ne!(get_time_ns(ClockType::Real), 0);
         assert_ne!(get_time_us(ClockType::Real), 0);
         assert!(get_time_ns(ClockType::Real) / 1000 <= get_time_us(ClockType::Real));
+        assert!(
+            get_time_ns(ClockType::Real) / NANOS_PER_MILLISECOND <= get_time_ms(ClockType::Real)
+        );
     }
 
     #[test]

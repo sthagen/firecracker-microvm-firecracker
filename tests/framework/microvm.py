@@ -19,6 +19,7 @@ import shutil
 import time
 import weakref
 
+from threading import Lock
 from retry import retry
 from retry.api import retry_call
 
@@ -27,7 +28,7 @@ import host_tools.cpu_load as cpu_tools
 import host_tools.memory as mem_tools
 import host_tools.network as net_tools
 
-import framework.utils as utils
+from framework import utils
 from framework.defs import MICROVM_KERNEL_RELPATH, MICROVM_FSFILES_RELPATH, \
     FC_PID_FILE_NAME
 from framework.http import Session
@@ -37,6 +38,7 @@ from framework.resources import Actions, Balloon, BootSource, Drive, \
     MachineConfigure, Metrics, Network, Vm, Vsock, SnapshotHelper
 
 LOG = logging.getLogger("microvm")
+data_lock = Lock()
 
 
 # pylint: disable=R0904
@@ -51,6 +53,7 @@ class Microvm:
     """
 
     SCREEN_LOGFILE = "/tmp/screen-{}.log"
+    __log_data = ""
 
     def __init__(
         self,
@@ -122,7 +125,6 @@ class Microvm:
 
         # Initialize the logging subsystem.
         self.logging_thread = None
-        self._log_data = ""
         self._screen_pid = None
 
         # The ssh config dictionary is populated with information about how
@@ -199,6 +201,11 @@ class Microvm:
             self._cpu_load_monitor.check_samples()
 
     @property
+    def firecracker_version(self):
+        """Return the version of the Firecracker executable."""
+        return self.version.get()
+
+    @property
     def api_session(self):
         """Return the api session associated with this microVM."""
         return self._api_session
@@ -252,8 +259,14 @@ class Microvm:
 
     @property
     def log_data(self):
-        """Return the log data."""
-        return self._log_data
+        """Return the log data.
+
+        !!!!OBS!!!!: Do not use this to check for message existence and
+        rather use self.check_log_message or self.find_log_message.
+        """
+        with data_lock:
+            log_data = self.__log_data
+        return log_data
 
     @property
     def rootfs_file(self):
@@ -324,7 +337,7 @@ class Microvm:
         pid_file_path = f"{self.jailer.chroot_path()}/{FC_PID_FILE_NAME}"
         if os.path.exists(pid_file_path):
             # Read the PID stored inside the file.
-            with open(pid_file_path) as file:
+            with open(pid_file_path, encoding='utf-8') as file:
                 fc_pid = int(file.readline())
 
         return fc_pid
@@ -358,7 +371,8 @@ class Microvm:
 
     def append_to_log_data(self, data):
         """Append a message to the log data."""
-        self._log_data += data
+        with data_lock:
+            self.__log_data += data
 
     def enable_cpu_load_monitor(self, threshold):
         """Enable the cpu load monitor."""
@@ -491,18 +505,21 @@ class Microvm:
         self.balloon = Balloon(self._api_socket, self._api_session)
         self.boot = BootSource(self._api_socket, self._api_session)
         self.desc_inst = DescribeInstance(self._api_socket, self._api_session)
-        self.drive = Drive(self._api_socket, self._api_session)
         self.full_cfg = FullConfig(self._api_socket, self._api_session)
         self.logger = Logger(self._api_socket, self._api_session)
+        self.version = InstanceVersion(
+            self._api_socket, self._fc_binary_path, self._api_session)
         self.machine_cfg = MachineConfigure(
             self._api_socket,
-            self._api_session
+            self._api_session,
+            self.firecracker_version
         )
         self.metrics = Metrics(self._api_socket, self._api_session)
         self.mmds = MMDS(self._api_socket, self._api_session)
         self.network = Network(self._api_socket, self._api_session)
         self.snapshot = SnapshotHelper(self._api_socket, self._api_session)
-        self.version = InstanceVersion(self._api_socket, self._api_session)
+        self.drive = Drive(self._api_socket, self._api_session,
+                           self.firecracker_version)
         self.vm = Vm(self._api_socket, self._api_session)
         self.vsock = Vsock(self._api_socket, self._api_session)
 
@@ -575,8 +592,8 @@ class Microvm:
             self._screen_pid = screen_pid
 
             self.jailer_clone_pid = int(open('/proc/{0}/task/{0}/children'
-                                             .format(screen_pid)
-                                             ).read().strip())
+                                             .format(screen_pid),
+                                             encoding='utf-8').read().strip())
 
             # Configure screen to flush stdout to file.
             flush_cmd = 'screen -S {session} -X colon "logfile flush 0^M"'
@@ -600,7 +617,14 @@ class Microvm:
     @retry(delay=0.1, tries=5)
     def check_log_message(self, message):
         """Wait until `message` appears in logging output."""
-        assert message in self._log_data
+        assert message in self.log_data
+
+    @retry(delay=0.1, tries=5)
+    def find_log_message(self, regex):
+        """Wait until `regex` appears in logging output and return it."""
+        reg_res = re.findall(regex, self.log_data)
+        assert reg_res
+        return reg_res
 
     def serial_input(self, input_string):
         """Send a string to the Firecracker serial console via screen."""
@@ -611,12 +635,13 @@ class Microvm:
     def basic_config(
         self,
         vcpu_count: int = 2,
-        ht_enabled: bool = False,
+        smt: bool = None,
         mem_size_mib: int = 256,
         add_root_device: bool = True,
         boot_args: str = None,
         use_initrd: bool = False,
-        track_dirty_pages: bool = False
+        track_dirty_pages: bool = False,
+        rootfs_io_engine=None
     ):
         """Shortcut for quickly configuring a microVM.
 
@@ -631,7 +656,7 @@ class Microvm:
         """
         response = self.machine_cfg.put(
             vcpu_count=vcpu_count,
-            ht_enabled=ht_enabled,
+            smt=smt,
             mem_size_mib=mem_size_mib,
             track_dirty_pages=track_dirty_pages
         )
@@ -662,7 +687,8 @@ class Microvm:
                 drive_id='rootfs',
                 path_on_host=self.create_jailed_resource(self.rootfs_file),
                 is_root_device=True,
-                is_read_only=False
+                is_read_only=False,
+                io_engine=rootfs_io_engine
             )
             assert self._api_session \
                        .is_status_no_content(response.status_code), \
@@ -707,6 +733,7 @@ class Microvm:
             is_read_only=False,
             partuuid=None,
             cache_type=None,
+            io_engine=None,
             use_ramdisk=False,
     ):
         """Add a block device."""
@@ -719,7 +746,8 @@ class Microvm:
             is_root_device=root_device,
             is_read_only=is_read_only,
             partuuid=partuuid,
-            cache_type=cache_type
+            cache_type=cache_type,
+            io_engine=io_engine
         )
         assert self.api_session.is_status_no_content(response.status_code)
 
@@ -735,7 +763,6 @@ class Microvm:
             self,
             network_config,
             iface_id,
-            allow_mmds_requests=False,
             tx_rate_limiter=None,
             rx_rate_limiter=None,
             tapname=None
@@ -747,7 +774,6 @@ class Microvm:
         ssh_config dictionary.
         :param network_config: UniqueIPv4Generator instance
         :param iface_id: the interface id for the API request
-        :param allow_mmds_requests: specifies whether requests sent from
         the guest on this interface towards the MMDS address are
         intercepted and processed by the device model.
         :param tx_rate_limiter: limit the tx rate
@@ -768,7 +794,6 @@ class Microvm:
             iface_id=iface_id,
             host_dev_name=tapname,
             guest_mac=guest_mac,
-            allow_mmds_requests=allow_mmds_requests,
             tx_rate_limiter=tx_rate_limiter,
             rx_rate_limiter=rx_rate_limiter
         )
@@ -856,7 +881,7 @@ class Microvm:
         """
         def monitor_fd(microvm, path):
             try:
-                fd = open(path, "r")
+                fd = open(path, "r", encoding='utf-8')
                 while True:
                     try:
                         if microvm().logging_thread.stopped():
@@ -909,7 +934,8 @@ class Serial:
             # serial already opened
             return
 
-        screen_log_fd = os.open(self._vm.screen_log, os.O_RDONLY)
+        screen_log_fd = os.open(self._vm.screen_log,
+                                os.O_RDONLY)
         self._poller = select.poll()
         self._poller.register(screen_log_fd,
                               select.POLLIN | select.POLLHUP)

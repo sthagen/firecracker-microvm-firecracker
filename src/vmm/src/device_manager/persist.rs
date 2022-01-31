@@ -3,7 +3,6 @@
 
 //! Provides functionality for saving/restoring the MMIO device manager and its devices.
 
-use std::io;
 use std::result::Result;
 use std::sync::{Arc, Mutex};
 
@@ -16,7 +15,7 @@ use arch::DeviceType;
 use devices::virtio::balloon::persist::{BalloonConstructorArgs, BalloonState};
 use devices::virtio::balloon::{Balloon, Error as BalloonError};
 use devices::virtio::block::persist::{BlockConstructorArgs, BlockState};
-use devices::virtio::block::Block;
+use devices::virtio::block::{Block, Error as BlockError};
 use devices::virtio::net::persist::{Error as NetError, NetConstructorArgs, NetState};
 use devices::virtio::net::Net;
 use devices::virtio::persist::{MmioTransportConstructorArgs, MmioTransportState};
@@ -36,7 +35,7 @@ use vm_memory::GuestMemoryMmap;
 #[derive(Debug)]
 pub enum Error {
     Balloon(BalloonError),
-    Block(io::Error),
+    Block(BlockError),
     DeviceManager(super::mmio::Error),
     MmioTransport,
     #[cfg(target_arch = "aarch64")]
@@ -204,14 +203,11 @@ impl<'a> Persist<'a> for MMIODeviceManager {
                     });
                 }
                 TYPE_BLOCK => {
-                    let block_state = locked_device
-                        .as_any()
-                        .downcast_ref::<Block>()
-                        .unwrap()
-                        .save();
+                    let block = locked_device.as_mut_any().downcast_mut::<Block>().unwrap();
+                    block.prepare_save();
                     states.block_devices.push(ConnectedBlockState {
                         device_id: devid.clone(),
-                        device_state: block_state,
+                        device_state: block.save(),
                         transport_state,
                         mmio_slot: devinfo.clone(),
                     });
@@ -276,7 +272,7 @@ impl<'a> Persist<'a> for MMIODeviceManager {
                     let serial = crate::builder::setup_serial_device(
                         constructor_args.event_manager,
                         Box::new(crate::builder::SerialStdin::get()),
-                        Box::new(io::stdout()),
+                        Box::new(std::io::stdout()),
                     )
                     .map_err(Error::Legacy)?;
 
@@ -573,7 +569,6 @@ mod tests {
                 guest_mac: None,
                 rx_rate_limiter: None,
                 tx_rate_limiter: None,
-                allow_mmds_requests: true,
             };
             insert_net_device(
                 &mut vmm,

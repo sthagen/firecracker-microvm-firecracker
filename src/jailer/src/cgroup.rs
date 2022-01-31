@@ -18,8 +18,6 @@ const PROC_MOUNTS: &str = if cfg!(test) {
     "/proc/mounts"
 };
 
-const NODE_TO_CPULIST: &str = "/sys/devices/system/node/node"; // This constant should be removed once the `--node` argument is removed.
-
 // Holds information on a cgroup mount point discovered on the system
 struct CgroupMountPoint {
     dir: String,
@@ -83,7 +81,7 @@ impl CgroupBuilder {
                 } else if ver == 1 && capture["ver"].is_empty() {
                     // Found a cgroupv1 mountpoint; with cgroupsv1 we can have multiple hierarchies.
                     // Since we don't know which one will be used, we cache the mountpoints now,
-                    // and will create the hierachies on demand when a cgroup is built.
+                    // and will create the hierarchies on demand when a cgroup is built.
                     b.mount_points.push(CgroupMountPoint {
                         dir: String::from(&capture["dir"]),
                         options: String::from(&capture["options"]),
@@ -136,7 +134,7 @@ impl CgroupBuilder {
     // Cgroups for a controller are arranged in a hierarchy; multiple controllers
     // may share the same hierarchy
     fn get_v1_hierarchy_path(&mut self, controller: &str) -> Result<&PathBuf> {
-        // First try and see if the path is alrady discovered
+        // First try and see if the path is already discovered.
         match self.hierarchies.entry(controller.to_string()) {
             Occupied(e) => Ok(e.into_mut()),
             Vacant(e) => {
@@ -158,39 +156,6 @@ impl CgroupBuilder {
                 }
             }
         }
-    }
-
-    // This function should be removed once the `--node` argument is removed.
-    // This function generates the corresponding cgroups for isolating the process in the specified
-    // NUMA node.
-    pub fn cgroups_from_numa_node(
-        &mut self,
-        numa_node: u32,
-        microvm_id: &str,
-        parent_cg: &Path,
-    ) -> Result<Vec<Box<dyn Cgroup>>> {
-        // Retrieve the CPUs which belongs to the specific node.
-        // Similar to how numactl library does, we are copying the contents of
-        // /sys/devices/system/node/nodeX/cpulist to the cpuset.cpus file for ensuring
-        // correct numa cpu assignment.
-        let cpus = readln_special(&PathBuf::from(format!(
-            "{}{}/cpulist",
-            NODE_TO_CPULIST, numa_node
-        )))?;
-
-        // Isolate the process in the specified numa_node CPUs.
-        let cpuset_cpus =
-            self.new_cgroup("cpuset.cpus".to_string(), cpus, microvm_id, parent_cg)?;
-
-        // Isolate the process in the specified numa_node memory.
-        let cpuset_mems = self.new_cgroup(
-            "cpuset.mems".to_string(),
-            numa_node.to_string(),
-            microvm_id,
-            parent_cg,
-        )?;
-
-        Ok(vec![cpuset_cpus, cpuset_mems])
     }
 }
 
@@ -291,7 +256,7 @@ fn get_controller_from_filename(file: &str) -> Result<&str> {
     let v: Vec<&str> = file.split('.').collect();
 
     // Check format <cgroup_controller>.<cgroup_property>
-    if v.len() != 2 {
+    if v.len() < 2 {
         return Err(Error::CgroupInvalidFile(file.to_string()));
     }
 
@@ -357,7 +322,7 @@ impl CgroupV2 {
     // Enables the specified controller along the cgroup nested path.
     // To be able to use a leaf controller within a nested cgroup hierarchy,
     // the controller needs to be enabled by writing to the cgroup.subtree_control
-    // of it's parent. This rule applies recursivelly.
+    // of it's parent. This rule applies recursively.
     fn write_all_subtree_control<P>(path: P, controller: &str) -> Result<()>
     where
         P: AsRef<Path>,
@@ -467,7 +432,7 @@ pub mod test_util {
     }
 
     // Helper object that simulates the layout of the cgroup file system
-    // This can be used for testing regardless of the availablity of a particular
+    // This can be used for testing regardless of the availability of a particular
     // version of cgroups on the system
     impl MockCgroupFs {
         const MOCK_PROCDIR: &'static str = "/tmp/firecracker/test/jailer/proc";
@@ -755,14 +720,14 @@ mod tests {
         assert!(result.is_ok());
         assert!(matches!(result, Ok(ctrl) if ctrl == "cpuset"));
 
-        // Check invalid file
-        file = "cpusetcpu";
+        // Check valid file with multiple '.'.
+        file = "memory.swap.high";
         result = get_controller_from_filename(file);
-        assert!(result.is_err());
-        assert!(format!("{:?}", result).contains("CgroupInvalidFile"));
+        assert!(result.is_ok());
+        assert!(matches!(result, Ok(ctrl) if ctrl == "memory"));
 
         // Check invalid file
-        file = "cpu.set.cpu";
+        file = "cpusetcpu";
         result = get_controller_from_filename(file);
         assert!(result.is_err());
         assert!(format!("{:?}", result).contains("CgroupInvalidFile"));

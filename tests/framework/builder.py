@@ -13,7 +13,7 @@ from framework.artifacts import (
     ArtifactCollection, Artifact, DiskArtifact, Snapshot,
     SnapshotType, NetIfaceConfig
 )
-import framework.utils as utils
+from framework import utils
 import host_tools.logging as log_tools
 import host_tools.network as net_tools
 
@@ -88,11 +88,12 @@ class MicrovmBuilder:
               cpu_template=None,
               fc_binary=None,
               jailer_binary=None,
-              use_ramdisk=False):
+              use_ramdisk=False,
+              smt=None, daemonize=True):
         """Build a fresh microvm."""
         vm = init_microvm(self.root_path, self.bin_cloner_path,
                           fc_binary, jailer_binary)
-
+        vm.jailer.daemonize = daemonize
         # Start firecracker.
         vm.spawn(use_ramdisk=use_ramdisk)
 
@@ -124,12 +125,12 @@ class MicrovmBuilder:
             response = vm.network.put(
                 iface_id=iface.dev_name,
                 host_dev_name=iface.tap_name,
-                guest_mac=guest_mac,
-                allow_mmds_requests=True,
+                guest_mac=guest_mac
             )
             assert vm.api_session.is_status_no_content(response.status_code)
 
-        with open(config.local_path()) as microvm_config_file:
+        with open(config.local_path(), encoding='utf-8') as \
+                microvm_config_file:
             microvm_config = json.load(microvm_config_file)
 
         response = vm.basic_config(
@@ -152,7 +153,7 @@ class MicrovmBuilder:
         response = vm.machine_cfg.put(
             vcpu_count=int(microvm_config['vcpu_count']),
             mem_size_mib=int(microvm_config['mem_size_mib']),
-            ht_enabled=bool(microvm_config['ht_enabled']),
+            smt=smt,
             track_dirty_pages=diff_snapshots,
             cpu_template=cpu_template,
         )
@@ -172,10 +173,12 @@ class MicrovmBuilder:
                             # Enable incremental snapshot capability.
                             diff_snapshots=False,
                             use_ramdisk=False,
-                            fc_binary=None, jailer_binary=None):
+                            fc_binary=None, jailer_binary=None,
+                            daemonize=True):
         """Build a microvm from a snapshot artifact."""
         vm = init_microvm(self.root_path, self.bin_cloner_path,
                           fc_binary, jailer_binary,)
+        vm.jailer.daemonize = daemonize
         vm.spawn(log_level='Error', use_ramdisk=use_ramdisk)
         vm.api_session.untime()
 
@@ -226,7 +229,8 @@ class MicrovmBuilder:
     def build_from_artifacts(self, config,
                              kernel, disks, cpu_template,
                              net_ifaces=None, diff_snapshots=False,
-                             fc_binary=None, jailer_binary=None):
+                             fc_binary=None, jailer_binary=None,
+                             daemonize=True):
         """Spawns a new Firecracker and applies specified config."""
         artifacts = ArtifactCollection(_test_images_s3_bucket())
         # Pick the first artifact in the set.
@@ -252,10 +256,11 @@ class MicrovmBuilder:
                           diff_snapshots=diff_snapshots,
                           cpu_template=cpu_template,
                           fc_binary=fc_binary,
-                          jailer_binary=jailer_binary)
+                          jailer_binary=jailer_binary,
+                          daemonize=daemonize)
 
     def build_vm_nano(self, fc_binary=None, jailer_binary=None,
-                      net_ifaces=None, diff_snapshots=False):
+                      net_ifaces=None, diff_snapshots=False, daemonize=True):
         """Create a clean VM in an initial state."""
         return self.build_from_artifacts("2vcpu_256mb",
                                          "vmlinux-4.14",
@@ -264,7 +269,8 @@ class MicrovmBuilder:
                                          net_ifaces=net_ifaces,
                                          diff_snapshots=diff_snapshots,
                                          fc_binary=fc_binary,
-                                         jailer_binary=jailer_binary)
+                                         jailer_binary=jailer_binary,
+                                         daemonize=daemonize)
 
     def build_vm_micro(self, fc_binary=None, jailer_binary=None,
                        net_ifaces=None, diff_snapshots=False):

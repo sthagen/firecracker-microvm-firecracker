@@ -6,26 +6,23 @@
 // found in the THIRD-PARTY file.
 
 use std::convert::From;
-use std::io::{self, Seek, SeekFrom, Write};
 use std::result;
 
 use logger::{error, IncMetric, METRICS};
-use rate_limiter::{RateLimiter, TokenType};
 use virtio_gen::virtio_blk::*;
 use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemoryError, GuestMemoryMmap};
 
 use super::super::DescriptorChain;
-use super::device::DiskProperties;
-use super::{Error, SECTOR_SHIFT, SECTOR_SIZE};
+use super::{io as block_io, Error, SECTOR_SHIFT};
+use crate::virtio::block::device::DiskProperties;
+use crate::virtio::SECTOR_SIZE;
+use rate_limiter::{RateLimiter, TokenType};
 
 #[derive(Debug)]
 pub enum IoErr {
-    GetDeviceId(GuestMemoryError),
-    Flush(io::Error),
+    GetId(GuestMemoryError),
     PartialTransfer { completed: u32, expected: u32 },
-    Seek(io::Error),
-    SyncAll(io::Error),
-    Transfer(GuestMemoryError),
+    FileEngine(block_io::Error),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,6 +44,12 @@ impl From<u32> for RequestType {
             t => RequestType::Unsupported(t),
         }
     }
+}
+
+pub enum ProcessingResult {
+    Submitted,
+    Throttled,
+    Executed(FinishedRequest),
 }
 
 pub struct FinishedRequest {
@@ -111,7 +114,10 @@ impl PendingRequest {
 
         let num_bytes_to_mem = mem
             .write_obj(status_code as u8, self.status_addr)
-            .map(|_| num_bytes_to_mem)
+            .map(|_| {
+                // Account for the status byte
+                num_bytes_to_mem + 1
+            })
             .unwrap_or_else(|e| {
                 error!("Failed to write virtio block status: {:?}", e);
                 // If we can't write the status, discard the virtio descriptor
@@ -119,8 +125,7 @@ impl PendingRequest {
             });
 
         FinishedRequest {
-            // Account for the status byte
-            num_bytes_to_mem: num_bytes_to_mem + 1,
+            num_bytes_to_mem,
             desc_idx: self.desc_idx,
         }
     }
@@ -323,6 +328,10 @@ impl Request {
         false
     }
 
+    fn offset(&self) -> u64 {
+        self.sector << SECTOR_SHIFT
+    }
+
     fn to_pending_request(&self, desc_idx: u16) -> PendingRequest {
         PendingRequest {
             r#type: self.r#type,
@@ -332,52 +341,56 @@ impl Request {
         }
     }
 
-    fn execute_seek(&self, disk: &mut DiskProperties) -> result::Result<(), IoErr> {
-        disk.file_mut()
-            .seek(SeekFrom::Start(self.sector << SECTOR_SHIFT))
-            .map(|_| ())
-            .map_err(IoErr::Seek)
-    }
-
-    pub(crate) fn execute(
-        &self,
+    pub(crate) fn process(
+        self,
         disk: &mut DiskProperties,
         desc_idx: u16,
         mem: &GuestMemoryMmap,
-    ) -> FinishedRequest {
+    ) -> ProcessingResult {
         let pending = self.to_pending_request(desc_idx);
         let res = match self.r#type {
-            RequestType::In => self.execute_seek(disk).and_then(|_| {
-                mem.read_from(self.data_addr, disk.file_mut(), self.data_len as usize)
-                    .map(|count| count as u32)
-                    .map_err(IoErr::Transfer)
-            }),
-            RequestType::Out => self.execute_seek(disk).and_then(|_| {
-                mem.write_to(self.data_addr, disk.file_mut(), self.data_len as usize)
-                    .map(|count| count as u32)
-                    .map_err(IoErr::Transfer)
-            }),
-            RequestType::Flush => {
-                // flush() first to force any cached data out.
-                disk.file_mut()
-                    .flush()
-                    .map_err(IoErr::Flush)
-                    .and_then(|_| {
-                        // Sync data out to physical media on host.
-                        disk.file_mut().sync_all().map_err(IoErr::SyncAll)
-                    })
-                    .map(|_| 0)
+            RequestType::In => disk.file_engine_mut().read(
+                self.offset(),
+                mem,
+                self.data_addr,
+                self.data_len,
+                pending,
+            ),
+            RequestType::Out => disk.file_engine_mut().write(
+                self.offset(),
+                mem,
+                self.data_addr,
+                self.data_len,
+                pending,
+            ),
+            RequestType::Flush => disk.file_engine_mut().flush(pending),
+            RequestType::GetDeviceID => {
+                let res = mem
+                    .write_slice(disk.image_id(), self.data_addr)
+                    .map(|_| VIRTIO_BLK_ID_BYTES)
+                    .map_err(IoErr::GetId);
+                return ProcessingResult::Executed(pending.finish(mem, res));
             }
-            RequestType::GetDeviceID => mem
-                .write_slice(disk.image_id(), self.data_addr)
-                .map(|_| VIRTIO_BLK_ID_BYTES)
-                .map_err(IoErr::Transfer),
-            RequestType::Unsupported(_op) => {
-                return pending.finish(mem, Ok(0));
+            RequestType::Unsupported(_) => {
+                return ProcessingResult::Executed(pending.finish(mem, Ok(0)));
             }
         };
 
-        pending.finish(mem, res)
+        match res {
+            Ok(block_io::FileEngineOk::Submitted) => ProcessingResult::Submitted,
+            Ok(block_io::FileEngineOk::Executed(res)) => {
+                ProcessingResult::Executed(res.user_data.finish(mem, Ok(res.count)))
+            }
+            Err(e) => {
+                if e.error.is_throttling_err() {
+                    ProcessingResult::Throttled
+                } else {
+                    ProcessingResult::Executed(
+                        e.user_data.finish(mem, Err(IoErr::FileEngine(e.error))),
+                    )
+                }
+            }
+        }
     }
 }
 

@@ -11,8 +11,10 @@ use std::sync::{Arc, Mutex};
 
 use super::RateLimiterConfig;
 use crate::Error as VmmError;
+use devices::virtio::block::Error as BlockError;
 use devices::virtio::Block;
 
+pub use devices::virtio::block::device::FileEngineType;
 pub use devices::virtio::CacheType;
 
 use serde::{Deserialize, Serialize};
@@ -27,13 +29,13 @@ pub enum DriveError {
     BlockDeviceUpdateFailed(io::Error),
     /// Unable to seek the block device backing file due to invalid permissions or
     /// the file was corrupted.
-    CreateBlockDevice(io::Error),
+    CreateBlockDevice(BlockError),
     /// Failed to create a `RateLimiter` object.
     CreateRateLimiter(io::Error),
     /// Error during drive update (patch).
     DeviceUpdate(VmmError),
     /// The block device path is invalid.
-    InvalidBlockDevicePath,
+    InvalidBlockDevicePath(String),
     /// Cannot open block device due to invalid permissions or path.
     OpenBlockDevice(io::Error),
     /// A root block device was already added.
@@ -44,16 +46,11 @@ impl Display for DriveError {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         use self::DriveError::*;
         match self {
-            CreateBlockDevice(e) => write!(
-                f,
-                "Unable to seek the block device backing file due to invalid permissions or \
-                 the file was corrupted. Error number: {}",
-                e
-            ),
+            CreateBlockDevice(e) => write!(f, "Unable to create the block device {:?}", e),
             BlockDeviceUpdateFailed(e) => write!(f, "The update operation failed: {}", e),
             CreateRateLimiter(e) => write!(f, "Cannot create RateLimiter: {}", e),
             DeviceUpdate(e) => write!(f, "Error during drive update (patch): {}", e),
-            InvalidBlockDevicePath => write!(f, "Invalid block device path!"),
+            InvalidBlockDevicePath(path) => write!(f, "Invalid block device path: {}", path),
             OpenBlockDevice(e) => write!(
                 f,
                 "Cannot open block device. Invalid permission/path: {}",
@@ -84,10 +81,14 @@ pub struct BlockDeviceConfig {
     pub is_read_only: bool,
     /// If set to true, the drive will ignore flush requests coming from
     /// the guest driver.
-    #[serde(default = "CacheType::default")]
+    #[serde(default)]
     pub cache_type: CacheType,
     /// Rate Limiter for I/O operations.
     pub rate_limiter: Option<RateLimiterConfig>,
+    /// The type of IO engine used by the device.
+    #[serde(default)]
+    #[serde(rename = "io_engine")]
+    pub file_engine_type: FileEngineType,
 }
 
 impl From<&Block> for BlockDeviceConfig {
@@ -101,6 +102,7 @@ impl From<&Block> for BlockDeviceConfig {
             is_read_only: block.is_read_only(),
             cache_type: block.cache_type(),
             rate_limiter: rl.into_option(),
+            file_engine_type: block.file_engine_type(),
         }
     }
 }
@@ -198,7 +200,10 @@ impl BlockBuilder {
         // check if the path exists
         let path_on_host = PathBuf::from(&block_device_config.path_on_host);
         if !path_on_host.exists() {
-            return Err(DriveError::InvalidBlockDevicePath);
+            return Err(DriveError::InvalidBlockDevicePath(format!(
+                "{}",
+                path_on_host.display()
+            )));
         }
 
         let rate_limiter = block_device_config
@@ -216,6 +221,7 @@ impl BlockBuilder {
             block_device_config.is_read_only,
             block_device_config.is_root_device,
             rate_limiter.unwrap_or_default(),
+            block_device_config.file_engine_type,
         )
         .map_err(DriveError::CreateBlockDevice)
     }
@@ -254,6 +260,7 @@ mod tests {
                 is_read_only: self.is_read_only,
                 drive_id: self.drive_id.clone(),
                 rate_limiter: None,
+                file_engine_type: FileEngineType::default(),
             }
         }
     }
@@ -277,6 +284,7 @@ mod tests {
             is_read_only: false,
             drive_id: dummy_id.clone(),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let mut block_devs = BlockBuilder::new();
@@ -307,6 +315,7 @@ mod tests {
             is_read_only: true,
             drive_id: String::from("1"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let mut block_devs = BlockBuilder::new();
@@ -334,6 +343,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("1"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let dummy_file_2 = TempFile::new().unwrap();
@@ -346,6 +356,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("2"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let mut block_devs = BlockBuilder::new();
@@ -369,6 +380,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("1"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let dummy_file_2 = TempFile::new().unwrap();
@@ -381,6 +393,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("2"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let dummy_file_3 = TempFile::new().unwrap();
@@ -393,6 +406,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("3"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let mut block_devs = BlockBuilder::new();
@@ -430,6 +444,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("1"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let dummy_file_2 = TempFile::new().unwrap();
@@ -442,6 +457,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("2"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let dummy_file_3 = TempFile::new().unwrap();
@@ -454,6 +470,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("3"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let mut block_devs = BlockBuilder::new();
@@ -492,6 +509,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("1"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let dummy_file_2 = TempFile::new().unwrap();
@@ -504,6 +522,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("2"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let mut block_devs = BlockBuilder::new();
@@ -539,12 +558,11 @@ mod tests {
         assert!(block_devs.list[index].lock().unwrap().is_read_only());
 
         // Update with invalid path.
-        let dummy_filename_3 = String::from("test_update_3");
-        let dummy_path_3 = dummy_filename_3;
-        dummy_block_device_2.path_on_host = dummy_path_3;
+        let dummy_path_3 = String::from("test_update_3");
+        dummy_block_device_2.path_on_host = dummy_path_3.clone();
         assert_eq!(
             block_devs.insert(dummy_block_device_2.clone()),
-            Err(DriveError::InvalidBlockDevicePath)
+            Err(DriveError::InvalidBlockDevicePath(dummy_path_3))
         );
 
         // Update with 2 root block devices.
@@ -563,6 +581,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("1"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
         // Switch roots and add a PARTUUID for the new one.
         let mut root_block_device_old = root_block_device;
@@ -575,6 +594,7 @@ mod tests {
             is_read_only: false,
             drive_id: String::from("2"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
         assert!(block_devs.insert(root_block_device_old).is_ok());
         let root_block_id = root_block_device_new.drive_id.clone();
@@ -596,6 +616,7 @@ mod tests {
             is_read_only: true,
             drive_id: String::from("1"),
             rate_limiter: None,
+            file_engine_type: FileEngineType::default(),
         };
 
         let mut block_devs = BlockBuilder::new();

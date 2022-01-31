@@ -33,13 +33,9 @@ net_ifaces = [NetIfaceConfig(),
 scratch_drives = ["vdb", "vdc", "vdd", "vde", "vdf"]
 
 
-@pytest.mark.skipif(
-    platform.machine() != "x86_64",
-    reason="Not supported yet."
-)
-def test_restore_old_snapshot_all_devices(bin_cloner_path):
+def test_restore_old_snapshot(bin_cloner_path):
     """
-    Test scenario: restore previous version snapshots in current version.
+    Restore from snapshots obtained with previous versions of Firecracker.
 
     @type: functional
     """
@@ -53,6 +49,7 @@ def test_restore_old_snapshot_all_devices(bin_cloner_path):
     # version.
     firecracker_artifacts = artifacts.firecrackers(
         max_version=get_firecracker_version_from_toml())
+
     for firecracker in firecracker_artifacts:
         firecracker.download()
         jailer = firecracker.jailer()
@@ -88,13 +85,9 @@ def test_restore_old_snapshot_all_devices(bin_cloner_path):
         logger.debug(microvm.log_data)
 
 
-@pytest.mark.skipif(
-    platform.machine() != "x86_64",
-    reason="Not supported yet."
-)
-def test_restore_old_version_all_devices(bin_cloner_path):
+def test_restore_old_version(bin_cloner_path):
     """
-    Test scenario: restore snapshot in previous versions of Firecracker.
+    Restore current snapshot with previous versions of Firecracker.
 
     @type: functional
     """
@@ -223,8 +216,7 @@ def test_save_tsc_old_version(bin_cloner_path):
         version='0.24.0'
     )
 
-    log_data = vm.log_data
-    assert "Saving to older snapshot version, TSC freq" in log_data
+    vm.check_log_message("Saving to older snapshot version, TSC freq")
     vm.kill()
 
 

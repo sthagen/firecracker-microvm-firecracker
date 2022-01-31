@@ -6,6 +6,7 @@ use event_manager::{EventOps, Events, MutEventSubscriber};
 use logger::{debug, error, warn};
 use utils::epoll::EventSet;
 
+use super::io::FileEngine;
 use crate::virtio::block::device::Block;
 use crate::virtio::VirtioDevice;
 
@@ -16,6 +17,11 @@ impl Block {
         }
         if let Err(e) = ops.add(Events::new(&self.rate_limiter, EventSet::IN)) {
             error!("Failed to register ratelimiter event: {}", e);
+        }
+        if let FileEngine::Async(engine) = self.disk.file_engine() {
+            if let Err(e) = ops.add(Events::new(engine.completion_evt(), EventSet::IN)) {
+                error!("Failed to register IO engine completion event: {}", e);
+            }
         }
     }
 
@@ -58,12 +64,17 @@ impl MutEventSubscriber for Block {
             let queue_evt = self.queue_evts[0].as_raw_fd();
             let rate_limiter_evt = self.rate_limiter.as_raw_fd();
             let activate_fd = self.activate_evt.as_raw_fd();
+            let maybe_completion_fd = match self.disk.file_engine() {
+                FileEngine::Async(engine) => Some(engine.completion_evt().as_raw_fd()),
+                FileEngine::Sync(_) => None,
+            };
 
             // Looks better than C style if/else if/else.
             match source {
                 _ if queue_evt == source => self.process_queue_event(),
                 _ if rate_limiter_evt == source => self.process_rate_limiter_event(),
                 _ if activate_fd == source => self.process_activate_event(ops),
+                _ if maybe_completion_fd == Some(source) => self.process_async_completion_event(),
                 _ => warn!("Block: Spurious event received: {:?}", source),
             }
         } else {
@@ -92,10 +103,12 @@ pub mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::virtio::block::test_utils::{default_block, set_queue};
+    use crate::virtio::block::device::FileEngineType;
+    use crate::virtio::block::test_utils::{
+        default_block, set_queue, simulate_async_completion_event,
+    };
     use crate::virtio::queue::tests::*;
     use crate::virtio::test_utils::{default_mem, initialize_virtqueue, VirtQueue};
-    use crate::virtio::IrqType;
     use event_manager::{EventManager, SubscriberOps};
     use virtio_gen::virtio_blk::*;
     use vm_memory::{Bytes, GuestAddress};
@@ -103,7 +116,7 @@ pub mod tests {
     #[test]
     fn test_event_handler() {
         let mut event_manager = EventManager::new().unwrap();
-        let mut block = default_block();
+        let mut block = default_block(FileEngineType::default());
         let mem = default_mem();
         let vq = VirtQueue::new(GuestAddress(0), &mem, 16);
         set_queue(&mut block, 0, vq.create_queue());
@@ -144,12 +157,8 @@ pub mod tests {
         event_manager
             .run_with_timeout(100)
             .expect("Metrics event timeout or error.");
-        // Validate the queue operation finished successfully.
-        assert!(block
-            .lock()
-            .unwrap()
-            .irq_trigger
-            .has_pending_irq(IrqType::Vring));
+        // Complete async IO ops if needed
+        simulate_async_completion_event(&mut block.lock().unwrap(), true);
 
         assert_eq!(vq.used.idx.get(), 1);
         assert_eq!(vq.used.ring[0].get().id, 0);

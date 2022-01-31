@@ -4,8 +4,6 @@
 
 # Disable pylint C0302: Too many lines in module
 # pylint: disable=C0302
-import array
-import itertools
 import os
 import platform
 import resource
@@ -19,6 +17,8 @@ import host_tools.drive as drive_tools
 import host_tools.network as net_tools
 
 from conftest import _test_images_s3_bucket
+
+from framework.utils import is_io_uring_supported
 from framework.artifacts import ArtifactCollection
 from framework.builder import MicrovmBuilder
 
@@ -39,6 +39,67 @@ def test_api_happy_start(test_microvm_with_api):
     test_microvm.basic_config()
 
     test_microvm.start()
+
+
+def test_drive_io_engine(test_microvm_with_api, network_config):
+    """
+    Test io_engine configuration.
+
+    Test that the io_engine can be configured via the API on kernels that
+    support the given type and that FC returns an error otherwise.
+
+    @type: functional
+    """
+    test_microvm = test_microvm_with_api
+    test_microvm.spawn()
+
+    test_microvm.basic_config(add_root_device=False)
+    test_microvm.ssh_network_config(network_config, '1')
+
+    supports_io_uring = is_io_uring_supported()
+
+    response = test_microvm.drive.put(
+        drive_id='rootfs',
+        path_on_host=test_microvm.create_jailed_resource(
+            test_microvm.rootfs_file),
+        is_root_device=True,
+        is_read_only=False,
+        # Set the opposite of the default backend type.
+        io_engine="Sync" if supports_io_uring else "Async"
+    )
+
+    if not supports_io_uring:
+        # The Async engine is not supported for older kernels.
+        assert test_microvm.api_session.is_status_bad_request(
+            response.status_code)
+
+        test_microvm.check_log_message(
+            "Received Error. Status code: 400 Bad Request. Message: Unable"
+            " to create the block device FileEngine(UnsupportedEngine(Async))")
+
+        # Now configure the default engine type and check that it works.
+        response = test_microvm.drive.put_with_default_io_engine(
+            drive_id='rootfs',
+            path_on_host=test_microvm.create_jailed_resource(
+                test_microvm.rootfs_file),
+            is_root_device=True,
+            is_read_only=False,
+        )
+
+    assert test_microvm.api_session.is_status_no_content(
+        response.status_code)
+
+    test_microvm.start()
+
+    ssh_conn = net_tools.SSHConnection(test_microvm.ssh_config)
+
+    # Execute a simple command to check that the guest booted successfully.
+    rc, _, stderr = ssh_conn.execute_command("sync")
+    assert rc == 0
+    assert stderr.read() == ''
+
+    assert test_microvm.full_cfg.get().json(
+    )['drives'][0]['io_engine'] == "Sync"
 
 
 def test_api_put_update_pre_boot(test_microvm_with_api):
@@ -120,7 +181,7 @@ def test_api_put_update_pre_boot(test_microvm_with_api):
     # The machine configuration has a default value, so all PUTs are updates.
     microvm_config_json = {
         'vcpu_count': 4,
-        'ht_enabled': True,
+        'smt': platform.machine() == 'x86_64',
         'mem_size_mib': 256,
         'track_dirty_pages': True
     }
@@ -130,14 +191,14 @@ def test_api_put_update_pre_boot(test_microvm_with_api):
     if platform.machine() == 'aarch64':
         response = test_microvm.machine_cfg.put(
             vcpu_count=microvm_config_json['vcpu_count'],
-            ht_enabled=microvm_config_json['ht_enabled'],
+            smt=microvm_config_json['smt'],
             mem_size_mib=microvm_config_json['mem_size_mib'],
             track_dirty_pages=microvm_config_json['track_dirty_pages']
         )
     else:
         response = test_microvm.machine_cfg.put(
             vcpu_count=microvm_config_json['vcpu_count'],
-            ht_enabled=microvm_config_json['ht_enabled'],
+            smt=microvm_config_json['smt'],
             mem_size_mib=microvm_config_json['mem_size_mib'],
             cpu_template=microvm_config_json['cpu_template'],
             track_dirty_pages=microvm_config_json['track_dirty_pages']
@@ -152,8 +213,8 @@ def test_api_put_update_pre_boot(test_microvm_with_api):
     vcpu_count = microvm_config_json['vcpu_count']
     assert response_json['vcpu_count'] == vcpu_count
 
-    ht_enabled = microvm_config_json['ht_enabled']
-    assert response_json['ht_enabled'] == ht_enabled
+    smt = microvm_config_json['smt']
+    assert response_json['smt'] == smt
 
     mem_size_mib = microvm_config_json['mem_size_mib']
     assert response_json['mem_size_mib'] == mem_size_mib
@@ -237,6 +298,102 @@ def test_net_api_put_update_pre_boot(test_microvm_with_api):
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
 
+def test_api_mmds_config(test_microvm_with_api):
+    """
+    Test /mmds/config PUT scenarios that unit tests can't cover.
+
+    Tests updates on MMDS config before and after attaching a network device.
+
+    @type: negative
+    """
+    test_microvm = test_microvm_with_api
+    test_microvm.spawn()
+
+    # Set up the microVM with 2 vCPUs, 256 MiB of RAM  and
+    # a root file system with the rw permission.
+    test_microvm.basic_config()
+
+    # Setting MMDS config with empty network interface IDs list is not allowed.
+    response = test_microvm.mmds.put_config(json={
+        'network_interfaces': []
+    })
+    err_msg = "The list of network interface IDs that allow " \
+              "forwarding MMDS requests is empty."
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
+    assert err_msg in response.text
+
+    # Setting MMDS config when no network device has been attached
+    # is not allowed.
+    response = test_microvm.mmds.put_config(json={
+        'network_interfaces': ['foo']
+    })
+    err_msg = "The list of network interface IDs provided contains " \
+              "at least one ID that does not correspond to any " \
+              "existing network interface."
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
+    assert err_msg in response.text
+
+    # Attach network interface.
+    tap = net_tools.Tap('tap1', test_microvm.jailer.netns)
+    response = test_microvm.network.put(
+        iface_id='1',
+        guest_mac='06:00:00:00:00:01',
+        host_dev_name=tap.name
+    )
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+
+    # Setting MMDS config with an ID that does not correspond to an already
+    # attached network device is not allowed.
+    response = test_microvm.mmds.put_config(json={
+        'network_interfaces': ['1', 'foo']
+    })
+    err_msg = "The list of network interface IDs provided contains" \
+              " at least one ID that does not correspond to any " \
+              "existing network interface."
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
+    assert err_msg in response.text
+
+    # Updates to MMDS version with invalid value are not allowed.
+    response = test_microvm.mmds.put_config(json={
+        'version': 'foo',
+        'network_interfaces': ['1']
+    })
+    err_msg = "An error occurred when deserializing the json body of a " \
+              "request: unknown variant `foo`, expected `V1` or `V2`"
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
+    assert err_msg in response.text
+
+    # Valid MMDS config not specifying version or IPv4 address.
+    response = test_microvm.mmds.put_config(json={
+        'network_interfaces': ['1']
+    })
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+    assert test_microvm.full_cfg.get().json(
+    )['mmds-config']['version'] == "V1"
+
+    # Valid MMDS config not specifying version.
+    mmds_config = {
+        'ipv4_address': '169.254.169.250',
+        'network_interfaces': ['1']
+    }
+    response = test_microvm.mmds.put_config(json=mmds_config)
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+    assert test_microvm.full_cfg.get().json(
+    )['mmds-config']['ipv4_address'] == "169.254.169.250"
+
+    # Valid MMDS config.
+    mmds_config = {
+        'version': 'V2',
+        'ipv4_address': '169.254.169.250',
+        'network_interfaces': ['1']
+    }
+    response = test_microvm.mmds.put_config(json=mmds_config)
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+    assert test_microvm.full_cfg.get().json(
+    )['mmds-config']['version'] == "V2"
+
+
+# pylint: disable=too-many-statements
 def test_api_machine_config(test_microvm_with_api):
     """
     Test /machine_config PUT/PATCH scenarios that unit tests can't cover.
@@ -252,9 +409,9 @@ def test_api_machine_config(test_microvm_with_api):
     )
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
 
-    # Test invalid type for ht_enabled flag.
+    # Test invalid type for smt flag.
     response = test_microvm.machine_cfg.put(
-        ht_enabled='random_string'
+        smt='random_string'
     )
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
 
@@ -269,6 +426,50 @@ def test_api_machine_config(test_microvm_with_api):
     )
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
 
+    # Test missing vcpu_count.
+    response = test_microvm.machine_cfg.put(
+        mem_size_mib=128
+    )
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
+    assert "Missing mandatory field: `vcpu_count`." in response.text
+
+    # Test missing mem_size_mib.
+    response = test_microvm.machine_cfg.put(
+        vcpu_count=2
+    )
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
+    assert "Missing mandatory field: `mem_size_mib`." in response.text
+
+    # Test default smt value.
+    response = test_microvm.machine_cfg.put(
+        mem_size_mib=128,
+        vcpu_count=1
+    )
+    assert test_microvm.api_session.is_status_no_content(
+        response.status_code
+    )
+
+    response = test_microvm.machine_cfg.get()
+    assert test_microvm.api_session.is_status_ok(response.status_code)
+    assert response.json()["smt"] is False
+
+    # Test that smt=True errors on ARM.
+    response = test_microvm.machine_cfg.patch(
+        smt=True
+    )
+    if platform.machine() == "x86_64":
+        assert test_microvm.api_session.is_status_no_content(
+            response.status_code
+        )
+    else:
+        assert test_microvm.api_session.is_status_bad_request(
+            response.status_code
+        )
+        assert \
+            "Enabling simultaneous multithreading is not supported on aarch64"\
+            in response.text
+
+    # Test that CPU template errors on ARM.
     response = test_microvm.machine_cfg.patch(
         cpu_template='C3'
     )
@@ -347,8 +548,11 @@ def test_api_machine_config(test_microvm_with_api):
     # Validate full vm configuration after patching machine config.
     response = test_microvm.full_cfg.get()
     assert test_microvm.api_session.is_status_ok(response.status_code)
-    assert response.json()['machine-config']['vcpu_count'] == 2
-    assert response.json()['machine-config']['mem_size_mib'] == 256
+    json = response.json()
+    assert json['machine-config']['vcpu_count'] == 2
+    assert json['machine-config']['mem_size_mib'] == 256
+    assert json['machine-config']['smt'] == (
+        platform.machine() == "x86_64")
 
 
 def test_api_put_update_post_boot(test_microvm_with_api):
@@ -397,7 +601,6 @@ def test_api_put_update_post_boot(test_microvm_with_api):
 
     response = test_microvm.machine_cfg.put(
         vcpu_count=4,
-        ht_enabled=False,
         mem_size_mib=128
     )
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
@@ -419,6 +622,16 @@ def test_api_put_update_post_boot(test_microvm_with_api):
         is_read_only=False,
         is_root_device=True
     )
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
+    assert expected_err in response.text
+
+    # MMDS config is not allowed post-boot.
+    mmds_config = {
+        'version': 'V2',
+        'ipv4_address': '169.254.169.250',
+        'network_interfaces': ['1']
+    }
+    response = test_microvm.mmds.put_config(json=mmds_config)
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
     assert expected_err in response.text
 
@@ -708,7 +921,7 @@ def test_drive_patch(test_microvm_with_api):
 
     # Sets up the microVM with 2 vCPUs, 256 MiB of RAM and
     # a root file system with the rw permission.
-    test_microvm.basic_config()
+    test_microvm.basic_config(rootfs_io_engine="Sync")
 
     # The drive to be patched.
     fs = drive_tools.FilesystemFile(
@@ -718,7 +931,8 @@ def test_drive_patch(test_microvm_with_api):
         drive_id='scratch',
         path_on_host=test_microvm.create_jailed_resource(fs.path),
         is_root_device=False,
-        is_read_only=False
+        is_read_only=False,
+        io_engine="Async" if is_io_uring_supported() else "Sync"
     )
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
@@ -800,6 +1014,15 @@ def _drive_patch(test_microvm):
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
     assert "unknown field `is_read_only`" in response.text
 
+    # Cannot patch io_engine post boot.
+    response = test_microvm.drive.patch(
+        drive_id='scratch',
+        path_on_host='foo.bar',
+        io_engine='Sync'
+    )
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
+    assert "unknown field `io_engine`" in response.text
+
     # Updates to `is_root_device` with a valid value are not allowed.
     response = test_microvm.drive.patch(
         drive_id='scratch',
@@ -815,8 +1038,9 @@ def _drive_patch(test_microvm):
         path_on_host='foo.bar'
     )
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
-    assert "drive update (patch): device error: No such file or directory" \
-           in response.text
+    assert "drive update (patch): device error: BackingFile(Os { code: 2, " \
+        "kind: NotFound, message: \\\"No such file or directory\\\" })" \
+        in response.text
 
     fs = drive_tools.FilesystemFile(
         os.path.join(test_microvm.fsfiles, 'scratch_new')
@@ -889,6 +1113,7 @@ def _drive_patch(test_microvm):
         'partuuid': None,
         'is_read_only': False,
         'cache_type': 'Unsafe',
+        'io_engine': 'Sync',
         'rate_limiter': None
     }, {
         'drive_id': 'scratch',
@@ -897,6 +1122,7 @@ def _drive_patch(test_microvm):
         'partuuid': None,
         'is_read_only': False,
         'cache_type': 'Unsafe',
+        'io_engine': 'Async' if is_io_uring_supported() else 'Sync',
         'rate_limiter': {
             'bandwidth': {
                 'size': 5000,
@@ -923,7 +1149,7 @@ def test_api_version(test_microvm_with_api):
     test_microvm.basic_config()
 
     # Getting the VM version should be available pre-boot.
-    preboot_response = test_microvm.version.get()
+    preboot_response = test_microvm.version.get_from_api()
     assert test_microvm.api_session.is_status_ok(preboot_response.status_code)
     # Check that the response contains the version.
     assert 'firecracker_version' in preboot_response.json()
@@ -932,7 +1158,7 @@ def test_api_version(test_microvm_with_api):
     test_microvm.start()
 
     # Getting the VM version should be available post-boot.
-    postboot_response = test_microvm.version.get()
+    postboot_response = test_microvm.version.get_from_api()
     assert test_microvm.api_session.is_status_ok(postboot_response.status_code)
     # Check that the response contains the version.
     assert 'firecracker_version' in postboot_response.json()
@@ -970,8 +1196,8 @@ def test_api_vsock(bin_cloner_path):
         jailer.download()
 
         vm_instance = builder.build_vm_nano(
-                                        fc_binary=firecracker.local_path(),
-                                        jailer_binary=jailer.local_path())
+            fc_binary=firecracker.local_path(),
+            jailer_binary=jailer.local_path())
 
         _test_vsock(vm_instance.vm)
 
@@ -1128,11 +1354,11 @@ def test_get_full_config(test_microvm_with_api):
 
     test_microvm.spawn()
     # Basic config also implies a root block device.
-    test_microvm.basic_config()
+    test_microvm.basic_config(rootfs_io_engine="Sync")
     expected_cfg['machine-config'] = {
         'vcpu_count': 2,
         'mem_size_mib': 256,
-        'ht_enabled': False,
+        'smt': False,
         'track_dirty_pages': False
     }
     expected_cfg['boot-source'] = {
@@ -1146,7 +1372,8 @@ def test_get_full_config(test_microvm_with_api):
         'partuuid': None,
         'is_read_only': False,
         'cache_type': 'Unsafe',
-        'rate_limiter': None
+        'rate_limiter': None,
+        'io_engine': 'Sync'
     }]
 
     # Add a memory balloon device.
@@ -1194,13 +1421,25 @@ def test_get_full_config(test_microvm_with_api):
         'host_dev_name': tap1.name,
         'guest_mac': '06:00:00:00:00:01',
         'rx_rate_limiter': None,
-        'tx_rate_limiter': tx_rl,
-        'allow_mmds_requests': False
+        'tx_rate_limiter': tx_rl
     }]
+
+    # Update MMDS config.
+    mmds_config = {
+        'version': 'V2',
+        'ipv4_address': '169.254.169.250',
+        'network_interfaces': ['1']
+    }
+    response = test_microvm.mmds.put_config(json=mmds_config)
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
 
     expected_cfg['logger'] = None
     expected_cfg['metrics'] = None
-    expected_cfg['mmds-config'] = None
+    expected_cfg['mmds-config'] = {
+        'version': 'V2',
+        'ipv4_address': '169.254.169.250',
+        'network_interfaces': ['1']
+    }
 
     # Getting full vm configuration should be available pre-boot.
     response = test_microvm.full_cfg.get()
@@ -1224,9 +1463,11 @@ def test_map_private_seccomp_regression(test_microvm_with_ssh):
     call mmap with MAP_PRIVATE|MAP_ANONYMOUS. This would result in vmm being
     killed by the seccomp filter before this PR.
 
-    @type: functional
+    @type: regression
     """
     test_microvm = test_microvm_with_ssh
+    test_microvm.jailer.extra_args.update(
+        {'http-api-max-payload-size': str(1024 * 1024 * 2)})
     test_microvm.spawn()
     test_microvm.api_session.untime()
 
@@ -1237,13 +1478,10 @@ def test_map_private_seccomp_regression(test_microvm_with_ssh):
     data_store = {
         'latest': {
             'meta-data': {
+                'ami-id': 'b' * (1024 * 1024)
             }
         }
     }
 
-    slice_1mb = array.array('u', itertools.repeat('b', 1024 * 1024))
-    chars = array.array('u')
-    chars = [chars.extend(slice_1mb) for _ in range(190)]
-    data_store["latest"]["meta-data"]["ami-id"] = chars
     response = test_microvm.mmds.put(json=data_store)
     assert test_microvm.api_session.is_status_no_content(response.status_code)

@@ -26,10 +26,9 @@ ECHO_SERVER_PORT = 5252
 def _guest_run_fio_iteration(ssh_connection, iteration):
     fio = """fio --filename=/dev/vda --direct=1 --rw=randread --bs=4k \
         --ioengine=libaio --iodepth=16 --runtime=10 --numjobs=4 --time_based \
-        --group_reporting --name=iops-test-job --eta-newline=1 --readonly"""
-    ssh_cmd = "screen -L -Logfile /tmp/fio{} -dmS test{} {}"
-    ssh_cmd = ssh_cmd.format(iteration, iteration, fio)
-    exit_code, _, _ = ssh_connection.execute_command(ssh_cmd)
+        --group_reporting --name=iops-test-job --eta-newline=1 --readonly \
+        --output /tmp/fio{} > /dev/null &""".format(iteration)
+    exit_code, _, _ = ssh_connection.execute_command(fio)
     assert exit_code == 0
 
 
@@ -282,7 +281,7 @@ def test_5_full_snapshots(network_config,
     # - Rootfs: Ubuntu 18.04
     # - Microvm: 2vCPU with 512 MB RAM
     # TODO: Multiple microvm sizes must be tested in the async pipeline.
-    microvm_artifacts = ArtifactSet(artifacts.microvms(keyword="2vcpu_256mb"))
+    microvm_artifacts = ArtifactSet(artifacts.microvms(keyword="2vcpu_512mb"))
     kernel_artifacts = ArtifactSet(artifacts.kernels(keyword="vmlinux-4.14"))
     disk_artifacts = ArtifactSet(artifacts.disks(keyword="ubuntu"))
 
@@ -324,7 +323,7 @@ def test_5_inc_snapshots(network_config,
     # Testing matrix:
     # - Guest kernel: Linux 4.9/4.14
     # - Rootfs: Ubuntu 18.04
-    # - Microvm: 2vCPU with 512 MB RAM
+    # - Microvm: 2vCPU with 4096 MB RAM
     # TODO: Multiple microvm sizes must be tested in the async pipeline.
     microvm_artifacts = ArtifactSet(artifacts.microvms(keyword="2vcpu_4096mb"))
     kernel_artifacts = ArtifactSet(artifacts.kernels(keyword="vmlinux-4.14"))
@@ -369,9 +368,9 @@ def test_load_snapshot_failure_handling(test_microvm_with_api):
     Path(snapshot_dir).mkdir(parents=True, exist_ok=True)
 
     snapshot_mem = os.path.join(snapshot_dir, "snapshot_mem")
-    open(snapshot_mem, "w+").close()
+    open(snapshot_mem, "w+", encoding='utf-8').close()
     snapshot_vmstate = os.path.join(snapshot_dir, "snapshot_vmstate")
-    open(snapshot_vmstate, "w+").close()
+    open(snapshot_vmstate, "w+", encoding='utf-8').close()
 
     # Hardlink the snapshot files into the microvm jail.
     jailed_mem = vm.create_jailed_resource(snapshot_mem)
@@ -563,7 +562,8 @@ def test_negative_snapshot_permissions(bin_cloner_path):
         _, _ = vm_builder.build_from_snapshot(snapshot, True, True)
     except AssertionError as error:
         # Check if proper error is returned.
-        assert "Block(Os { code: 13, kind: PermissionDenied" in str(error)
+        assert "Block(BackingFile(Os { code: 13, kind: PermissionDenied" \
+            in str(error)
     else:
         assert False, "Negative test failed"
 
@@ -601,3 +601,32 @@ def test_negative_snapshot_create(bin_cloner_path):
     assert not os.path.exists('memfile')
 
     vm.kill()
+
+
+def test_create_large_diff_snapshot(test_microvm_with_api):
+    """
+    Create large diff snapshot seccomp regression test.
+
+    When creating a diff snapshot of a microVM with a large memory size, an
+    mmap(MAP_PRIVATE|MAP_ANONYMOUS) is issued. Test that the default seccomp
+    filter allows it.
+
+    @type: regression
+    @issue: https://github.com/firecracker-microvm/firecracker/discussions/2811
+    """
+    vm = test_microvm_with_api
+    vm.spawn()
+    vm.basic_config(mem_size_mib=16*1024, track_dirty_pages=True)
+
+    vm.start()
+
+    response = vm.vm.patch(state='Paused')
+    assert vm.api_session.is_status_no_content(response.status_code)
+
+    response = vm.snapshot.create(mem_file_path='memfile',
+                                  snapshot_path='statefile',
+                                  diff=True)
+
+    # If the regression was not fixed, this would have failed. The Firecracker
+    # process would have been taken down.
+    assert vm.api_session.is_status_no_content(response.status_code)

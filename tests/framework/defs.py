@@ -26,7 +26,7 @@ SECCOMPILER_TARGET_DIR = FC_WORKSPACE_DIR / "build/seccompiler"
 SECCOMP_JSON_DIR = FC_WORKSPACE_DIR / "resources/seccomp"
 
 # Maximum accepted duration of an API call, in milliseconds
-MAX_API_CALL_DURATION_MS = 300
+MAX_API_CALL_DURATION_MS = 500
 
 # Relative path to the location of the kernel file
 MICROVM_KERNEL_RELPATH = 'kernel/'
@@ -52,3 +52,7 @@ TEST_RESULTS_DIR = FC_WORKSPACE_DIR / "test_results"
 # Name of the file that stores firecracker's PID when launched by jailer with
 #  `--new-pid-ns`.
 FC_PID_FILE_NAME = "firecracker.pid"
+
+# The minimum required host kernel version for which io_uring is supported in
+# Firecracker.
+MIN_KERNEL_VERSION_FOR_IO_URING = "5.10.51"

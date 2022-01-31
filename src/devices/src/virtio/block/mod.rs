@@ -3,6 +3,7 @@
 
 pub mod device;
 pub mod event_handler;
+mod io;
 pub mod persist;
 pub mod request;
 pub mod test_utils;
@@ -19,6 +20,9 @@ pub const SECTOR_SIZE: u64 = (0x01_u64) << SECTOR_SHIFT;
 pub const QUEUE_SIZE: u16 = 256;
 pub const NUM_QUEUES: usize = 1;
 pub const QUEUE_SIZES: &[u16] = &[QUEUE_SIZE];
+// The virtio queue can hold up to 256 descriptors, but 1 request spreads across 2-3 descriptors.
+// So we can use 128 IO_URING entries without ever triggering a FullSq Error.
+pub const IO_URING_NUM_ENTRIES: u16 = 128;
 
 #[derive(Debug)]
 pub enum Error {
@@ -38,4 +42,16 @@ pub enum Error {
     UnexpectedReadOnlyDescriptor,
     /// Guest gave us a write only descriptor that protocol says to read from.
     UnexpectedWriteOnlyDescriptor,
+    // Error coming from the IO engine.
+    FileEngine(io::Error),
+    // Error manipulating the backing file.
+    BackingFile(std::io::Error),
+    // Error opening eventfd.
+    EventFd(std::io::Error),
+    // Error creating an irqfd.
+    IrqTrigger(std::io::Error),
+    // Error coming from the rate limiter.
+    RateLimiter(std::io::Error),
+    // Persistence error.
+    Persist(crate::virtio::persist::Error),
 }

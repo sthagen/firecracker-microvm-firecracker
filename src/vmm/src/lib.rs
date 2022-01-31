@@ -52,6 +52,7 @@ use crate::vstate::{
     vm::Vm,
 };
 use arch::DeviceType;
+use devices::legacy::serial::{IER_RDA_BIT, IER_RDA_OFFSET};
 use devices::virtio::balloon::Error as BalloonError;
 use devices::virtio::{
     Balloon, BalloonConfig, BalloonStats, Block, MmioTransport, Net, BALLOON_DEV_ID, TYPE_BALLOON,
@@ -351,6 +352,44 @@ impl Vmm {
         &self.guest_memory
     }
 
+    /// Sets RDA bit in serial console
+    pub fn emulate_serial_init(&self) -> Result<()> {
+        #[cfg(target_arch = "aarch64")]
+        use devices::legacy::SerialDevice;
+        #[cfg(target_arch = "x86_64")]
+        let mut serial = self
+            .pio_device_manager
+            .stdio_serial
+            .lock()
+            .expect("Poisoned lock");
+
+        #[cfg(target_arch = "aarch64")]
+        let serial_bus_device = self.get_bus_device(DeviceType::Serial, "Serial");
+        #[cfg(target_arch = "aarch64")]
+        if serial_bus_device.is_none() {
+            return Ok(());
+        }
+        #[cfg(target_arch = "aarch64")]
+        let mut serial_device_locked = serial_bus_device.unwrap().lock().expect("Poisoned lock");
+        #[cfg(target_arch = "aarch64")]
+        let serial = serial_device_locked
+            .as_mut_any()
+            .downcast_mut::<SerialDevice>()
+            .expect("Unexpected BusDeviceType");
+
+        // When restoring from a previously saved state, there is no serial
+        // driver initialization, therefore the RDA (Received Data Available)
+        // interrupt is not enabled. Because of that, the driver won't get
+        // notified of any bytes that we send to the guest. The clean solution
+        // would be to save the whole serial device state when we do the vm
+        // serialization. For now we set that bit manually
+        serial
+            .serial
+            .write(IER_RDA_OFFSET, IER_RDA_BIT)
+            .map_err(|_| Error::Serial(std::io::Error::last_os_error()))?;
+        Ok(())
+    }
+
     /// Injects CTRL+ALT+DEL keystroke combo in the i8042 device.
     #[cfg(target_arch = "x86_64")]
     pub fn send_ctrl_alt_del(&mut self) -> Result<()> {
@@ -520,7 +559,7 @@ impl Vmm {
             .with_virtio_device_with_id(TYPE_BLOCK, drive_id, |block: &mut Block| {
                 block
                     .update_disk_image(path_on_host)
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| format!("{:?}", e))
             })
             .map_err(Error::DeviceManager)
     }

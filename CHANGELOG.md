@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.0]
 
 ### Added
 
@@ -19,12 +19,48 @@
 - Added metrics for accesses to deprecated HTTP and command line API endpoints.
 - Added permanent HTTP endpoint for `GET` on `/version` for getting the
   Firecracker version.
-- Added `--metadata` paramater to enable MMDS content to be supplied from a file
+- Added `--metadata` parameter to enable MMDS content to be supplied from a file
   allowing the MMDS to be used when using `--no-api` to disable the API server.
+- Checksum file for the release assets.
+- Added support for custom headers to MMDS requests. Accepted headers are:
+  `X-metadata-token`, which accepts a string value that provides a session
+  token for MMDS requests; and `X-metadata-token-ttl-seconds`, which
+  specifies the lifetime of the session token in seconds.
+- Support and validation for host and guest kernel 5.10.
+- A [kernel support policy](docs/kernel-policy.md).
+- Added `io_engine` to the pre-boot block device configuration.
+  Possible values: `Sync` (the default option) or `Async` (only available for
+  kernels newer than 5.10.51). The `Async` variant introduces a block device
+  engine that uses io_uring for executing requests asynchronously, which is in
+  **developer preview** (NOT for production use).
+  See `docs/api_requests/block-io-engine.md`.
+- Added `block.io_engine_throttled_events` metric for measuring the number of
+  virtio events throttled because of the IO engine.
+- New optional `version` field to PUT requests towards `/mmds/config` to
+  configure MMDS version. Accepted values are `V1` and `V2` and default is
+  `V1`. MMDS `V2` is **developer preview only** (NOT for production use) and
+  it does not currently work after snapshot load.
+- Mandatory `network_interfaces` field to PUT requests towards
+  `/mmds/config` which contains a list of network interface IDs capable of
+  forwarding packets to MMDS.
 
 ### Changed
 
+- Removed the `--node` jailer parameter.
 - Deprecated `vsock_id` body field in `PUT`s on `/vsock`.
+- Removed the deprecated the `--seccomp-level parameter`.
+- `GET` requests to MMDS require a session token to be provided through
+  `X-metadata-token` header when using V2.
+- Allow `PUT` requests to MMDS in order to generate a session token
+  to be used for future `GET` requests when version 2 is used.
+- Remove `allow_mmds_requests` field from the request body that attaches network
+  interfaces. Specifying interfaces that allow forwarding requests to MMDS is done
+  by adding the network interface's ID to the `network_interfaces` field of PUT
+  `/mmds/config` request's body.
+- Renamed `/machine-config` `ht_enabled` to `smt`.
+- `smt` field is now optional on PUT `/machine-config`, defaulting to
+  `false`.
+- Configuring `smt: true` on aarch64 via the API is forbidden.
 
 ### Fixed
 
@@ -34,6 +70,8 @@
 - Adapt T2 and C3 CPU templates for kernel 5.10. Firecracker was not previously
   masking some CPU features of the host or emulated by KVM, introduced in more
   recent kernels: `umip`, `vmx`, `avx512_vnni`.
+- Fix jailer's cgroup implementation to accept properties that contain multiple
+  dots.
 
 ## [0.25.0]
 

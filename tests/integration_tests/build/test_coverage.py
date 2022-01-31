@@ -15,16 +15,23 @@ import re
 import shutil
 import pytest
 
-import framework.utils as utils
+from framework import utils
 import host_tools.cargo_build as host  # pylint: disable=import-error
-import host_tools.proc as proc
+from host_tools import proc
+
+# We have different coverages based on the host kernel version. This is
+# caused by io_uring, which is only supported by FC for kernels newer
+# than 5.10.
 
 # AMD has a slightly different coverage due to
 # the appearance of the brand string. On Intel,
 # this contains the frequency while on AMD it does not.
 # Checkout the cpuid crate. In the future other
 # differences may appear.
-COVERAGE_DICT = {"Intel": 84.65, "AMD": 84.10, "ARM": 82.71}
+if utils.is_io_uring_supported():
+    COVERAGE_DICT = {"Intel": 85.09, "AMD": 84.51, "ARM": 83.98}
+else:
+    COVERAGE_DICT = {"Intel": 82.03, "AMD": 81.5, "ARM": 80.91}
 
 PROC_MODEL = proc.proc_type()
 
@@ -68,6 +75,7 @@ def test_coverage(test_fc_session_root_path, test_session_tmp_path):
         'elf.rs,'
         'mpspec.rs,'
         'msr_index.rs,'
+        'bindings.rs,'
         '_gen'
     )
     exclude_region = '\'mod tests {\''
@@ -98,7 +106,7 @@ def test_coverage(test_fc_session_root_path, test_session_tmp_path):
     shutil.rmtree(SECCOMPILER_BUILD_DIR)
 
     coverage_file = os.path.join(test_session_tmp_path, KCOV_COVERAGE_FILE)
-    with open(coverage_file) as cov_output:
+    with open(coverage_file, encoding='utf-8') as cov_output:
         contents = cov_output.read()
         covered_lines = int(re.findall(KCOV_COVERED_LINES_REGEX, contents)[0])
         total_lines = int(re.findall(KCOV_TOTAL_LINES_REGEX, contents)[0])
