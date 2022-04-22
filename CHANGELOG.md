@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The API `PATCH` methods for `machine-config` can now be used to reset
+  the `cpu_template` to `"None"`. Until this change there was no way to
+  reset the `cpu_template` once it was set.
+- Added a `rebase-snap` tool for rebasing a diff snapshot over a base
+  snapshot.
+- Mmds version is persisted across snapshot-restore. Snapshot compatibility is
+  preserved bidirectionally, to and from a Firecracker version that does not
+  support persisting the Mmds version. In such cases, the default V1 option is
+  used.
+- Added `--mmds-size-limit` for limiting the mmds data store size instead of
+  piggy-backing on `--http-api-max-payload-size`. If left unconfigured it
+  defaults to the value of `--http-api-max-payload-size`, to provide backwards
+  compatibility.
+
+### Changed
+
+- The API `PATCH` method for `/machine-config` can be now used to change
+  `track_dirty_pages` on aarch64.
+- MmdsV2 is now Generally Available.
+
+### Fixed
+
+- Fixed inconsistency that allowed the start of a microVM from a JSON file
+  without specifying the `vcpu_count` and `mem_size_mib` parameters for
+  `machine-config` although they are mandatory when configuring via the API.
+  Now these fields are mandatory when specifying `machine-config` in the JSON
+  file and when using the `PUT` request on `/machine-config`.
+- Fixed inconsistency that allowed a user to specify the `cpu_template`
+  parameter and set `smt` to `True` in `machine-config` when starting from a
+  JSON file on aarch64 even though they are not permitted when using `PUT` or
+  `PATCH` in the API. Now Firecracker will return an error on aarch64 if `smt`
+  is set to `True` or if `cpu_template` is specified.
+- Fixed inconsistent behaviour of the `PUT` method for `/machine-config` that
+  would reset the `track_dirty_pages` parameter to `false` if it was not
+  specified in the JSON body of the request, but left the `cpu_template`
+  parameter intact if it was not present in the request. Now a `PUT` request
+  for `/machine-config` will reset all optional parameters (`smt`,
+  `cpu_template`, `track_dirty_pages`) to their default values if they are
+  not specified in the `PUT` request.
+
 ## [1.0.0]
 
 ### Added
@@ -64,6 +108,10 @@
 
 ### Fixed
 
+- GET `/vm/config` was returning a default config object after restoring from a
+  snapshot. It now correctly returns the config of the original microVM, except
+  for boot_config and the cpu_template and smt fields of the machine config,
+  which are currently lost.
 - Fixed incorrect propagation of init parameters in kernel commandline.
   Related to:
   [#2709](https://github.com/firecracker-microvm/firecracker/issues/2709).

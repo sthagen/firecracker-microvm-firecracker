@@ -28,9 +28,6 @@ use logger::{error, info};
 use vmm::rpc_interface::{VmmAction, VmmActionError};
 
 pub(crate) enum RequestAction {
-    GetMMDS,
-    PatchMMDS(Value),
-    PutMMDS(Value),
     Sync(Box<VmmAction>),
     ShutdownInternal, // !!! not an API, used by shutdown to thread::join the API thread
 }
@@ -148,6 +145,17 @@ impl ParsedRequest {
         response
     }
 
+    pub(crate) fn success_response_with_mmds_value(body_data: &Value) -> Response {
+        info!("The request was executed successfully. Status code: 200 OK.");
+        let mut response = Response::new(Version::Http11, StatusCode::OK);
+        let body_str = match body_data {
+            Value::Null => "{}".to_string(),
+            _ => serde_json::to_string(body_data).unwrap(),
+        };
+        response.set_body(Body::new(body_str));
+        response
+    }
+
     pub(crate) fn convert_to_response(
         request_outcome: &std::result::Result<VmmData, VmmActionError>,
     ) -> Response {
@@ -160,6 +168,7 @@ impl ParsedRequest {
                 VmmData::MachineConfiguration(vm_config) => {
                     Self::success_response_with_data(vm_config)
                 }
+                VmmData::MmdsValue(value) => Self::success_response_with_mmds_value(value),
                 VmmData::BalloonConfig(balloon_config) => {
                     Self::success_response_with_data(balloon_config)
                 }
@@ -171,11 +180,22 @@ impl ParsedRequest {
                 VmmData::FullVmConfig(config) => Self::success_response_with_data(config),
             },
             Err(vmm_action_error) => {
-                error!(
-                    "Received Error. Status code: 400 Bad Request. Message: {}",
-                    vmm_action_error
-                );
-                let mut response = Response::new(Version::Http11, StatusCode::BadRequest);
+                let mut response = match vmm_action_error {
+                    VmmActionError::MmdsLimitExceeded(_err) => {
+                        error!(
+                            "Received Error. Status code: 413 Payload too large. Message: {}",
+                            vmm_action_error
+                        );
+                        Response::new(Version::Http11, StatusCode::PayloadTooLarge)
+                    }
+                    _ => {
+                        error!(
+                            "Received Error. Status code: 400 Bad Request. Message: {}",
+                            vmm_action_error
+                        );
+                        Response::new(Version::Http11, StatusCode::BadRequest)
+                    }
+                };
                 response.set_body(Body::new(ApiServer::json_fault_message(
                     vmm_action_error.to_string(),
                 )));
@@ -330,14 +350,6 @@ pub(crate) mod tests {
                 (RequestAction::Sync(ref sync_req), RequestAction::Sync(ref other_sync_req)) => {
                     sync_req == other_sync_req
                 }
-                (RequestAction::GetMMDS, RequestAction::GetMMDS) => true,
-                (RequestAction::PutMMDS(ref val), RequestAction::PutMMDS(ref other_val)) => {
-                    val == other_val
-                }
-                (RequestAction::PatchMMDS(ref val), RequestAction::PatchMMDS(ref other_val)) => {
-                    val == other_val
-                }
-
                 _ => false,
             }
         }
@@ -575,6 +587,9 @@ pub(crate) mod tests {
                 VmmData::MachineConfiguration(cfg) => {
                     http_response(&serde_json::to_string(cfg).unwrap(), 200)
                 }
+                VmmData::MmdsValue(value) => {
+                    http_response(&serde_json::to_string(value).unwrap(), 200)
+                }
                 VmmData::InstanceInformation(info) => {
                     http_response(&serde_json::to_string(info).unwrap(), 200)
                 }
@@ -597,6 +612,7 @@ pub(crate) mod tests {
         verify_ok_response_with(VmmData::Empty);
         verify_ok_response_with(VmmData::FullVmConfig(VmmConfig::default()));
         verify_ok_response_with(VmmData::MachineConfiguration(VmConfig::default()));
+        verify_ok_response_with(VmmData::MmdsValue(serde_json::from_str("{}").unwrap()));
         verify_ok_response_with(VmmData::InstanceInformation(InstanceInfo::default()));
         verify_ok_response_with(VmmData::VmmVersion(String::default()));
 
@@ -787,8 +803,8 @@ pub(crate) mod tests {
         let (mut sender, receiver) = UnixStream::pair().unwrap();
         let mut connection = HttpConnection::new(receiver);
         let body = "{ \
-            \"vcpu_count\": 0, \
-            \"mem_size_mib\": 0 \
+            \"vcpu_count\": 1, \
+            \"mem_size_mib\": 1 \
         }";
         sender
             .write_all(http_request("PUT", "/machine-config", Some(&body)).as_bytes())
@@ -1007,8 +1023,8 @@ pub(crate) mod tests {
         let (mut sender, receiver) = UnixStream::pair().unwrap();
         let mut connection = HttpConnection::new(receiver);
         let body = "{ \
-            \"vcpu_count\": 0, \
-            \"mem_size_mib\": 0 \
+            \"vcpu_count\": 1, \
+            \"mem_size_mib\": 1 \
         }";
         sender
             .write_all(http_request("PATCH", "/machine-config", Some(&body)).as_bytes())
@@ -1017,8 +1033,8 @@ pub(crate) mod tests {
         let req = connection.pop_parsed_request().unwrap();
         assert!(ParsedRequest::try_from_request(&req).is_ok());
         let body = "{ \
-            \"vcpu_count\": 0, \
-            \"mem_size_mib\": 0, \
+            \"vcpu_count\": 1, \
+            \"mem_size_mib\": 1, \
             \"smt\": false, \
             \"cpu_template\": \"C3\" \
         }";

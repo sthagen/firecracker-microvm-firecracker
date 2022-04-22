@@ -8,7 +8,9 @@ use std::convert::From;
 use std::net::Ipv4Addr;
 use std::num::NonZeroUsize;
 use std::result::Result;
+use std::sync::{Arc, Mutex};
 
+use crate::Mmds;
 use dumbo::pdu::arp::{
     test_speculative_tpa, Error as ArpFrameError, EthIPv4ArpFrame, ETH_IPV4_FRAME_LEN,
 };
@@ -61,13 +63,15 @@ pub struct MmdsNetworkStack {
     // The Ethernet MAC address of the MMDS server.
     pub(crate) mac_addr: MacAddr,
     // MMDS server IPv4 address.
-    pub(crate) ipv4_addr: Ipv4Addr,
+    pub ipv4_addr: Ipv4Addr,
     // ARP reply destination IPv4 address (requester of address resolution reply).
     // It is the Ipv4Addr of the network interface for which the MmdsNetworkStack
     // routes the packets.
     pending_arp_reply_dest: Option<Ipv4Addr>,
     // This handles MMDS<->guest interaction at the TCP level.
     pub(crate) tcp_handler: TcpIPv4Handler,
+    // Data store reference shared across all MmdsNetworkStack instances.
+    pub mmds: Arc<Mutex<Mmds>>,
 }
 
 impl MmdsNetworkStack {
@@ -77,6 +81,7 @@ impl MmdsNetworkStack {
         tcp_port: u16,
         max_connections: NonZeroUsize,
         max_pending_resets: NonZeroUsize,
+        mmds: Arc<Mutex<Mmds>>,
     ) -> Self {
         MmdsNetworkStack {
             remote_mac_addr: mac_addr,
@@ -89,10 +94,11 @@ impl MmdsNetworkStack {
                 max_connections,
                 max_pending_resets,
             ),
+            mmds,
         }
     }
 
-    pub fn new_with_defaults(mmds_ipv4_addr: Option<Ipv4Addr>) -> Self {
+    pub fn new_with_defaults(mmds_ipv4_addr: Option<Ipv4Addr>, mmds: Arc<Mutex<Mmds>>) -> Self {
         // The unwrap is safe if parse_str() is implemented properly.
         let mac_addr = MacAddr::parse_str(DEFAULT_MAC_ADDR).unwrap();
         let ipv4_addr = mmds_ipv4_addr.unwrap_or_else(|| Ipv4Addr::from(DEFAULT_IPV4_ADDR));
@@ -104,12 +110,17 @@ impl MmdsNetworkStack {
             DEFAULT_TCP_PORT,
             NonZeroUsize::new(DEFAULT_MAX_CONNECTIONS).unwrap(),
             NonZeroUsize::new(DEFAULT_MAX_PENDING_RESETS).unwrap(),
+            mmds,
         )
     }
 
     pub fn set_ipv4_addr(&mut self, ipv4_addr: Ipv4Addr) {
         self.ipv4_addr = ipv4_addr;
         self.tcp_handler.set_local_ipv4_addr(ipv4_addr);
+    }
+
+    pub fn ipv4_addr(&self) -> Ipv4Addr {
+        self.ipv4_addr
     }
 
     pub fn default_ipv4_addr() -> Ipv4Addr {
@@ -119,17 +130,20 @@ impl MmdsNetworkStack {
     // This is the entry point into the MMDS network stack. The src slice should hold the contents
     // of an Ethernet frame (of that exact size, without the CRC).
     pub fn detour_frame(&mut self, src: &[u8]) -> bool {
-        // The frame cannot possibly contain an ARP request or IPv4 packet for the MMDS.
-        if !test_speculative_tpa(src, self.ipv4_addr)
-            && !test_speculative_dst_addr(src, self.ipv4_addr)
-        {
-            return false;
-        }
-
         if let Ok(eth) = EthernetFrame::from_bytes(src) {
             match eth.ethertype() {
-                ETHERTYPE_ARP => return self.detour_arp(eth),
-                ETHERTYPE_IPV4 => return self.detour_ipv4(eth),
+                ETHERTYPE_ARP => {
+                    if !test_speculative_tpa(src, self.ipv4_addr) {
+                        return false;
+                    }
+                    return self.detour_arp(eth);
+                }
+                ETHERTYPE_IPV4 => {
+                    if !test_speculative_dst_addr(src, self.ipv4_addr) {
+                        return false;
+                    }
+                    return self.detour_ipv4(eth);
+                }
                 _ => (),
             };
         } else {
@@ -160,10 +174,10 @@ impl MmdsNetworkStack {
                 // Note-2: For every routed packet we will have a single source MAC address, because
                 // each MmdsNetworkStack routes packets for only one network device.
                 self.remote_mac_addr = eth.src_mac();
-                match self
-                    .tcp_handler
-                    .receive_packet(&ip, super::convert_to_response)
-                {
+                let mmds_instance = self.mmds.clone();
+                match &mut self.tcp_handler.receive_packet(&ip, move |request| {
+                    super::convert_to_response(mmds_instance, request)
+                }) {
                     Ok(event) => {
                         METRICS.mmds.rx_count.inc();
                         match event {
@@ -382,11 +396,14 @@ mod tests {
 
     #[test]
     fn test_ns_new_with_defaults() {
-        let ns = MmdsNetworkStack::new_with_defaults(None);
+        let ns = MmdsNetworkStack::new_with_defaults(None, Arc::new(Mutex::new(Mmds::default())));
         assert_eq!(ns.mac_addr, MacAddr::parse_str(DEFAULT_MAC_ADDR).unwrap());
         assert_eq!(ns.ipv4_addr, Ipv4Addr::from(DEFAULT_IPV4_ADDR));
 
-        let ns = MmdsNetworkStack::new_with_defaults(Some(Ipv4Addr::LOCALHOST));
+        let ns = MmdsNetworkStack::new_with_defaults(
+            Some(Ipv4Addr::LOCALHOST),
+            Arc::new(Mutex::new(Mmds::default())),
+        );
         assert_eq!(ns.mac_addr, MacAddr::parse_str(DEFAULT_MAC_ADDR).unwrap());
         assert_eq!(ns.ipv4_addr, Ipv4Addr::LOCALHOST);
     }
@@ -394,7 +411,8 @@ mod tests {
     #[test]
     #[allow(clippy::cognitive_complexity)]
     fn test_ns() {
-        let mut ns = MmdsNetworkStack::new_with_defaults(None);
+        let mut ns =
+            MmdsNetworkStack::new_with_defaults(None, Arc::new(Mutex::new(Mmds::default())));
         let mut buf = [0u8; 2000];
         let mut bad_buf = [0u8; 1];
 
@@ -513,7 +531,8 @@ mod tests {
 
     #[test]
     fn test_set_ipv4_addr() {
-        let mut ns = MmdsNetworkStack::new_with_defaults(None);
+        let mut ns =
+            MmdsNetworkStack::new_with_defaults(None, Arc::new(Mutex::new(Mmds::default())));
         assert_ne!(ns.ipv4_addr, Ipv4Addr::LOCALHOST);
         assert_ne!(ns.tcp_handler.local_ipv4_addr(), Ipv4Addr::LOCALHOST);
         ns.set_ipv4_addr(Ipv4Addr::LOCALHOST);
@@ -526,5 +545,58 @@ mod tests {
         let actual = MmdsNetworkStack::default_ipv4_addr();
         let expected = Ipv4Addr::from(DEFAULT_IPV4_ADDR);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_break_speculative_check_detour_arp() {
+        let mut buf = [0u8; 2000];
+        let ip = Ipv4Addr::from(DEFAULT_IPV4_ADDR);
+        let other_ip = Ipv4Addr::new(5, 6, 7, 8);
+        let mac = MacAddr::from_bytes_unchecked(&[0; 6]);
+        let mut ns = MmdsNetworkStack::new(
+            mac,
+            ip,
+            DEFAULT_TCP_PORT,
+            NonZeroUsize::new(DEFAULT_MAX_CONNECTIONS).unwrap(),
+            NonZeroUsize::new(DEFAULT_MAX_PENDING_RESETS).unwrap(),
+            Arc::new(Mutex::new(Mmds::default())),
+        );
+
+        let mut eth =
+            EthernetFrame::write_incomplete(buf.as_mut(), mac, mac, ETHERTYPE_ARP).unwrap();
+        let mut arp = EthIPv4ArpFrame::from_bytes_unchecked(eth.inner_mut().payload_mut());
+        arp.set_tpa(other_ip);
+        let len = ns.write_arp_request(buf.as_mut(), false);
+
+        eth = EthernetFrame::write_incomplete(buf.as_mut(), mac, mac, ETHERTYPE_ARP).unwrap();
+        IPv4Packet::from_bytes_unchecked(eth.inner_mut().payload_mut()).set_destination_address(ip);
+
+        assert_eq!(false, ns.detour_frame(&buf[..len]));
+    }
+
+    #[test]
+    fn test_break_speculative_check_detour_ipv4() {
+        let mut buf = [0u8; 2000];
+        let ip = Ipv4Addr::from(DEFAULT_IPV4_ADDR);
+        let other_ip = Ipv4Addr::new(5, 6, 7, 8);
+        let mac = MacAddr::from_bytes_unchecked(&[0; 6]);
+        let mut ns = MmdsNetworkStack::new(
+            mac,
+            ip,
+            DEFAULT_TCP_PORT,
+            NonZeroUsize::new(DEFAULT_MAX_CONNECTIONS).unwrap(),
+            NonZeroUsize::new(DEFAULT_MAX_PENDING_RESETS).unwrap(),
+            Arc::new(Mutex::new(Mmds::default())),
+        );
+
+        let mut eth =
+            EthernetFrame::write_incomplete(buf.as_mut(), mac, mac, ETHERTYPE_IPV4).unwrap();
+        IPv4Packet::from_bytes_unchecked(eth.inner_mut().payload_mut())
+            .set_destination_address(other_ip);
+        let len = ns.write_incoming_tcp_segment(buf.as_mut(), other_ip, TcpFlags::SYN);
+        eth = EthernetFrame::write_incomplete(buf.as_mut(), mac, mac, ETHERTYPE_IPV4).unwrap();
+        let mut arp = EthIPv4ArpFrame::from_bytes_unchecked(eth.inner_mut().payload_mut());
+        arp.set_tpa(ip);
+        assert_eq!(false, ns.detour_frame(&buf[..len]));
     }
 }

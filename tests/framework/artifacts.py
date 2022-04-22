@@ -11,7 +11,7 @@ from stat import S_IREAD, S_IWRITE
 from pathlib import Path
 import boto3
 import botocore.client
-from framework.defs import DEFAULT_TEST_SESSION_ROOT_PATH
+from framework.defs import DEFAULT_TEST_SESSION_ROOT_PATH, SUPPORTED_KERNELS
 from framework.utils import compare_versions
 from host_tools.snapshot_helper import merge_memory_bitmaps
 
@@ -137,10 +137,15 @@ class Artifact:
                         artifact_type=self.type,
                         local_folder=local_folder, is_copy=True)
 
+    def cleanup(self):
+        """Delete the backing files from disk."""
+        if os.path.exists(self._key):
+            os.remove(self._key)
+
     def __del__(self):
         """Teardown the object."""
-        if self._is_copy and os.path.exists(self._key):
-            os.remove(self._key)
+        if self._is_copy:
+            self.cleanup()
 
 
 class SnapshotArtifact:
@@ -415,13 +420,19 @@ class ArtifactCollection:
 
     def kernels(self, keyword=None):
         """Return kernel artifacts for the current arch."""
-        return self._fetch_artifacts(
+        kernels = self._fetch_artifacts(
             ArtifactCollection.ARTIFACTS_KERNELS,
             ArtifactCollection.MICROVM_KERNEL_EXTENSION,
             ArtifactType.KERNEL,
             Artifact,
             keyword=keyword
         )
+
+        valid_kernels = list(filter(
+            lambda kernel: any(s in kernel.key for s in SUPPORTED_KERNELS),
+            kernels
+        ))
+        return valid_kernels
 
     def disks(self, keyword=None):
         """Return disk artifacts for the current arch."""
@@ -525,6 +536,24 @@ DEFAULT_GUEST_IP = "192.168.0.2"
 DEFAULT_TAP_NAME = "tap0"
 DEFAULT_DEV_NAME = "eth0"
 DEFAULT_NETMASK = 30
+
+
+def create_net_devices_configuration(num):
+    """Define configuration for the requested number of net devices."""
+    host_ip = "192.168.{}.1"
+    guest_ip = "192.168.{}.2"
+    tap_name = "tap{}"
+    dev_name = "eth{}"
+
+    net_ifaces = []
+    for i in range(num):
+        net_iface = NetIfaceConfig(host_ip=host_ip.format(i),
+                                   guest_ip=guest_ip.format(i),
+                                   tap_name=tap_name.format(i),
+                                   dev_name=dev_name.format(i))
+        net_ifaces.append(net_iface)
+
+    return net_ifaces
 
 
 class NetIfaceConfig:

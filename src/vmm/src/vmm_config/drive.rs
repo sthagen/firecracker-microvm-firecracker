@@ -156,6 +156,15 @@ impl BlockBuilder {
             .position(|b| b.lock().expect("Poisoned lock").id().eq(drive_id))
     }
 
+    /// Inserts an existing block device.
+    pub fn add_device(&mut self, block_device: Arc<Mutex<Block>>) {
+        if block_device.lock().expect("Poisoned lock").is_root_device() {
+            self.list.push_front(block_device);
+        } else {
+            self.list.push_back(block_device);
+        }
+    }
+
     /// Inserts a `Block` in the block devices list using the specified configuration.
     /// If a block with the same id already exists, it will overwrite it.
     /// Inserting a secondary root block device will fail.
@@ -238,8 +247,8 @@ impl BlockBuilder {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
+    use rate_limiter::RateLimiter;
     use utils::tempfile::TempFile;
 
     impl PartialEq for DriveError {
@@ -625,5 +634,37 @@ mod tests {
         let configs = block_devs.configs();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs.first().unwrap(), &dummy_block_device);
+    }
+
+    #[test]
+    fn test_add_device() {
+        let mut block_devs = BlockBuilder::new();
+        let backing_file = TempFile::new().unwrap();
+        let block_id = "test_id";
+        let block = Block::new(
+            block_id.to_string(),
+            None,
+            CacheType::default(),
+            backing_file.as_path().to_str().unwrap().to_string(),
+            true,
+            true,
+            RateLimiter::default(),
+            FileEngineType::default(),
+        )
+        .unwrap();
+
+        block_devs.add_device(Arc::new(Mutex::new(block)));
+        assert_eq!(block_devs.list.len(), 1);
+        assert_eq!(
+            block_devs
+                .list
+                .pop_back()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .deref()
+                .id(),
+            block_id
+        )
     }
 }

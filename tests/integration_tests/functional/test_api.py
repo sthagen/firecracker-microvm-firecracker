@@ -19,8 +19,9 @@ import host_tools.network as net_tools
 from conftest import _test_images_s3_bucket
 
 from framework.utils import is_io_uring_supported
-from framework.artifacts import ArtifactCollection
-from framework.builder import MicrovmBuilder
+from framework.artifacts import ArtifactCollection, SnapshotType, \
+    NetIfaceConfig, DEFAULT_DEV_NAME, DEFAULT_TAP_NAME
+from framework.builder import MicrovmBuilder, SnapshotBuilder
 
 MEM_LIMIT = 1000000000
 
@@ -424,21 +425,21 @@ def test_api_machine_config(test_microvm_with_api):
     response = test_microvm.machine_cfg.patch(
         track_dirty_pages=True
     )
-    assert test_microvm.api_session.is_status_bad_request(response.status_code)
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
 
     # Test missing vcpu_count.
     response = test_microvm.machine_cfg.put(
         mem_size_mib=128
     )
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
-    assert "Missing mandatory field: `vcpu_count`." in response.text
+    assert "missing field `vcpu_count` at line 1 column 21." in response.text
 
     # Test missing mem_size_mib.
     response = test_microvm.machine_cfg.put(
         vcpu_count=2
     )
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
-    assert "Missing mandatory field: `mem_size_mib`." in response.text
+    assert "missing field `mem_size_mib` at line 1 column 17." in response.text
 
     # Test default smt value.
     response = test_microvm.machine_cfg.put(
@@ -499,8 +500,13 @@ def test_api_machine_config(test_microvm_with_api):
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
     assert fail_msg in response.text
 
-    # Test mem_size_mib of valid type, but too large.
+    # Reset the configuration of the microvm
+    # This will explicitly set vcpu_num = 2, mem_size_mib = 256
+    # track_dirty_pages = false. All other parameters are
+    # unspecified so will revert to default values.
     test_microvm.basic_config()
+
+    # Test mem_size_mib of valid type, but too large.
     firecracker_pid = int(test_microvm.jailer_clone_pid)
     resource.prlimit(
         firecracker_pid,
@@ -531,10 +537,25 @@ def test_api_machine_config(test_microvm_with_api):
     response = test_microvm.machine_cfg.patch(
         mem_size_mib=256
     )
+
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
+    # Set the cpu template again
+    response = test_microvm.machine_cfg.patch(
+        cpu_template='C3'
+    )
+    if platform.machine() == "x86_64":
+        assert test_microvm.api_session.is_status_no_content(
+            response.status_code
+        )
+    else:
+        assert test_microvm.api_session.is_status_bad_request(
+            response.status_code
+        )
+        assert "CPU templates are not supported on aarch64" in response.text
+
     response = test_microvm.actions.put(action_type='InstanceStart')
-    if utils.get_cpu_vendor() != utils.CpuVendor.INTEL:
+    if utils.get_cpu_vendor() == utils.CpuVendor.AMD:
         # We shouldn't be able to apply Intel templates on AMD hosts
         fail_msg = "Internal error while starting microVM: Error configuring" \
                    " the vcpu for boot: Cpuid error: InvalidVendor"
@@ -551,8 +572,7 @@ def test_api_machine_config(test_microvm_with_api):
     json = response.json()
     assert json['machine-config']['vcpu_count'] == 2
     assert json['machine-config']['mem_size_mib'] == 256
-    assert json['machine-config']['smt'] == (
-        platform.machine() == "x86_64")
+    assert json['machine-config']['smt'] is False
 
 
 def test_api_put_update_post_boot(test_microvm_with_api):
@@ -1340,6 +1360,141 @@ def test_api_balloon(test_microvm_with_api):
     # requesting u32::MAX / 128.
     response = test_microvm.balloon.patch(amount_mib=33554432)
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
+
+
+def test_get_full_config_after_restoring_snapshot(bin_cloner_path):
+    """
+    Test the configuration of a microVM after restoring from a snapshot.
+
+    @type: functional
+    """
+    microvm_builder = MicrovmBuilder(bin_cloner_path)
+    net_iface = NetIfaceConfig()
+    vm_instance = microvm_builder.build_vm_nano(
+        net_ifaces=[net_iface],
+        io_engine='Sync')
+    test_microvm = vm_instance.vm
+    root_disk = vm_instance.disks[0]
+    ssh_key = vm_instance.ssh_key
+    cpu_vendor = utils.get_cpu_vendor()
+
+    setup_cfg = {}
+
+    # Basic config also implies a root block device.
+    setup_cfg['machine-config'] = {
+        'vcpu_count': 2,
+        'mem_size_mib': 256,
+        'smt': True,
+        'track_dirty_pages': False
+    }
+
+    if cpu_vendor == utils.CpuVendor.INTEL:
+        setup_cfg['machine-config']['cpu_template'] = 'C3'
+
+    test_microvm.machine_cfg.patch(**setup_cfg['machine-config'])
+
+    setup_cfg['drives'] = [{
+        'drive_id': 'rootfs',
+        'path_on_host': f"/{os.path.basename(root_disk.local_path())}",
+        'is_root_device': True,
+        'partuuid': None,
+        'is_read_only': False,
+        'cache_type': 'Unsafe',
+        'rate_limiter': None,
+        'io_engine': 'Sync'
+    }]
+
+    # Add a memory balloon device.
+    response = test_microvm.balloon.put(amount_mib=1, deflate_on_oom=True)
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+    setup_cfg['balloon'] = {
+        'amount_mib': 1,
+        'deflate_on_oom': True,
+        'stats_polling_interval_s': 0
+    }
+
+    # Add a vsock device.
+    response = test_microvm.vsock.put(
+        guest_cid=15,
+        uds_path='vsock.sock'
+    )
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+    setup_cfg['vsock'] = {
+        'guest_cid': 15,
+        'uds_path': 'vsock.sock'
+    }
+
+    setup_cfg['logger'] = None
+    setup_cfg['metrics'] = None
+    setup_cfg['mmds-config'] = {
+        'version': "V1",
+        'network_interfaces': [DEFAULT_DEV_NAME]
+    }
+
+    response = test_microvm.mmds.put_config(json=setup_cfg['mmds-config'])
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+
+    # Start the microvm.
+    test_microvm.start()
+
+    # Add a tx rate limiter to the net device.
+    tx_rl = {
+        'bandwidth': {
+            'size': 1000000,
+            'refill_time': 100,
+            'one_time_burst': None
+        },
+        'ops': None
+    }
+
+    response = test_microvm.network.patch(
+        iface_id=DEFAULT_DEV_NAME,
+        tx_rate_limiter=tx_rl
+    )
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+    setup_cfg['network-interfaces'] = [{
+        'guest_mac': net_tools.mac_from_ip(net_iface.guest_ip),
+        'iface_id': DEFAULT_DEV_NAME,
+        'host_dev_name': DEFAULT_TAP_NAME,
+        'rx_rate_limiter': None,
+        'tx_rate_limiter': tx_rl
+    }]
+    # Create a snapshot builder from a microvm.
+    snapshot_builder = SnapshotBuilder(test_microvm)
+
+    # Create base snapshot.
+    snapshot = snapshot_builder.create([root_disk.local_path()],
+                                       ssh_key,
+                                       SnapshotType.FULL)
+
+    microvm, _ = microvm_builder.build_from_snapshot(snapshot, True, False)
+
+    expected_cfg = setup_cfg.copy()
+
+    # We expect boot-source, machine-config.smt, and
+    # machine-config.cpu_template to all be empty/default after restoring
+    # from a snapshot.
+    expected_cfg['boot-source'] = {
+        'kernel_image_path': '',
+        'initrd_path': None
+    }
+    expected_cfg['machine-config']['smt'] = False
+
+    if cpu_vendor == utils.CpuVendor.INTEL:
+        expected_cfg['machine-config'].pop('cpu_template')
+
+    # no ipv4 specified during PUT /mmds/config so we expect the default
+    expected_cfg['mmds-config'] = {
+        'version': 'V1',
+        'ipv4_address': '169.254.169.254',
+        'network_interfaces': [DEFAULT_DEV_NAME]
+    }
+
+    # Validate full vm configuration post-restore.
+    response = microvm.full_cfg.get()
+    assert microvm.api_session.is_status_ok(response.status_code)
+    assert response.json() != setup_cfg
+    assert response.json() == expected_cfg
 
 
 def test_get_full_config(test_microvm_with_api):

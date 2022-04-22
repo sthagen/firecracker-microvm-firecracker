@@ -13,14 +13,12 @@ from framework.artifacts import ArtifactCollection, ArtifactSet
 from framework.builder import MicrovmBuilder, SnapshotBuilder, SnapshotType
 from framework.matrix import TestMatrix, TestContext
 from framework.utils import wait_process_termination
-from framework.utils_vsock import make_blob, \
-    check_host_connections, check_guest_connections
+from framework.utils_vsock import make_blob, check_host_connections, \
+    check_guest_connections, _copy_vsock_data_to_guest, VSOCK_UDS_PATH, \
+    make_host_port_path, ECHO_SERVER_PORT
 
 import host_tools.network as net_tools  # pylint: disable=import-error
 import host_tools.drive as drive_tools
-
-VSOCK_UDS_PATH = "v.sock"
-ECHO_SERVER_PORT = 5252
 
 
 def _guest_run_fio_iteration(ssh_connection, iteration):
@@ -40,19 +38,6 @@ def _get_guest_drive_size(ssh_connection, guest_dev_name='/dev/vdb'):
     assert stderr.read() == ''
     stdout.readline()  # skip "SIZE"
     return stdout.readline().strip()
-
-
-def _copy_vsock_data_to_guest(ssh_connection,
-                              blob_path,
-                              vm_blob_path,
-                              vsock_helper):
-    # Copy the data file and a vsock helper to the guest.
-    cmd = "mkdir -p /tmp/vsock && mount -t tmpfs tmpfs /tmp/vsock"
-    ecode, _, _ = ssh_connection.execute_command(cmd)
-    assert ecode == 0, "Failed to set up tmpfs drive on the guest."
-
-    ssh_connection.scp_file(vsock_helper, '/bin/vsock_helper')
-    ssh_connection.scp_file(blob_path, vm_blob_path)
 
 
 def _test_seq_snapshots(context):
@@ -127,7 +112,7 @@ def _test_seq_snapshots(context):
         # Test vsock guest-initiated connections.
         path = os.path.join(
             microvm.path,
-            "{}_{}".format(VSOCK_UDS_PATH, ECHO_SERVER_PORT)
+            make_host_port_path(VSOCK_UDS_PATH, ECHO_SERVER_PORT)
         )
         check_guest_connections(microvm, path, vm_blob_path, blob_hash)
         # Test vsock host-initiated connections.
@@ -166,7 +151,7 @@ def _test_compare_mem_files(context):
     root_disk = context.disk.copy()
     # Get ssh key from read-only artifact.
     ssh_key = context.disk.ssh_key()
-    # Create a fresh microvm from aftifacts.
+    # Create a fresh microvm from artifacts.
     vm_instance = vm_builder.build(kernel=context.kernel,
                                    disks=[root_disk],
                                    ssh_key=ssh_key,
@@ -277,12 +262,12 @@ def test_5_full_snapshots(network_config,
 
     artifacts = ArtifactCollection(_test_images_s3_bucket())
     # Testing matrix:
-    # - Guest kernel: Linux 4.9/4.14
+    # - Guest kernel: All supported ones
     # - Rootfs: Ubuntu 18.04
     # - Microvm: 2vCPU with 512 MB RAM
     # TODO: Multiple microvm sizes must be tested in the async pipeline.
     microvm_artifacts = ArtifactSet(artifacts.microvms(keyword="2vcpu_512mb"))
-    kernel_artifacts = ArtifactSet(artifacts.kernels(keyword="vmlinux-4.14"))
+    kernel_artifacts = ArtifactSet(artifacts.kernels())
     disk_artifacts = ArtifactSet(artifacts.disks(keyword="ubuntu"))
 
     # Create a test context and add builder, logger, network.
@@ -321,12 +306,12 @@ def test_5_inc_snapshots(network_config,
 
     artifacts = ArtifactCollection(_test_images_s3_bucket())
     # Testing matrix:
-    # - Guest kernel: Linux 4.9/4.14
+    # - Guest kernel: All supported ones
     # - Rootfs: Ubuntu 18.04
     # - Microvm: 2vCPU with 4096 MB RAM
     # TODO: Multiple microvm sizes must be tested in the async pipeline.
     microvm_artifacts = ArtifactSet(artifacts.microvms(keyword="2vcpu_4096mb"))
-    kernel_artifacts = ArtifactSet(artifacts.kernels(keyword="vmlinux-4.14"))
+    kernel_artifacts = ArtifactSet(artifacts.kernels())
     disk_artifacts = ArtifactSet(artifacts.disks(keyword="ubuntu"))
 
     # Create a test context and add builder, logger, network.
@@ -401,11 +386,11 @@ def test_cmp_full_and_first_diff_mem(network_config,
 
     artifacts = ArtifactCollection(_test_images_s3_bucket())
     # Testing matrix:
-    # - Guest kernel: Linux 4.9/4.14
+    # - Guest kernel: All supported ones
     # - Rootfs: Ubuntu 18.04
     # - Microvm: 2vCPU with 512 MB RAM
     microvm_artifacts = ArtifactSet(artifacts.microvms(keyword="2vcpu_512mb"))
-    kernel_artifacts = ArtifactSet(artifacts.kernels(keyword="vmlinux-4.14"))
+    kernel_artifacts = ArtifactSet(artifacts.kernels())
     disk_artifacts = ArtifactSet(artifacts.disks(keyword="ubuntu"))
 
     # Create a test context and add builder, logger, network.

@@ -36,9 +36,11 @@ use crate::vstate::{
     vcpu::{Vcpu, VcpuConfig},
     vm::Vm,
 };
-use crate::{device_manager, Error, EventManager, Vmm, VmmEventsObserver};
+use crate::{device_manager, mem_size_mib, Error, EventManager, Vmm, VmmEventsObserver};
 
+use crate::resources::VmResources;
 use crate::vmm_config::instance_info::InstanceInfo;
+use crate::vmm_config::machine_config::{VmConfigError, VmUpdateConfig};
 use arch::InitrdConfig;
 #[cfg(target_arch = "x86_64")]
 use cpuid::common::is_same_model;
@@ -97,6 +99,8 @@ pub enum StartMicrovmError {
     RegisterMmioDevice(device_manager::mmio::Error),
     /// Cannot restore microvm state.
     RestoreMicrovmState(MicrovmStateError),
+    /// Unable to set VmResources.
+    SetVmResources(VmConfigError),
 }
 
 /// It's convenient to automatically convert `linux_loader::cmdline::Error`s
@@ -112,7 +116,7 @@ impl Display for StartMicrovmError {
         use self::StartMicrovmError::*;
         match self {
             AttachBlockDevice(err) => {
-                write!(f, "Unable to attach block device to Vmm. Error: {}", err)
+                write!(f, "Unable to attach block device to Vmm: {}", err)
             }
             ConfigureSystem(e) => write!(f, "System configuration error: {:?}", e),
             CreateRateLimiter(err) => write!(f, "Cannot create RateLimiter: {}", err),
@@ -178,6 +182,7 @@ impl Display for StartMicrovmError {
                 )
             }
             RestoreMicrovmState(err) => write!(f, "Cannot restore microvm state. Error: {}", err),
+            SetVmResources(err) => write!(f, "Cannot set vm resources. Error: {}", err),
         }
     }
 }
@@ -324,13 +329,8 @@ pub fn build_microvm_for_boot(
     let boot_config = vm_resources.boot_source().ok_or(MissingKernelConfig)?;
 
     let track_dirty_pages = vm_resources.track_dirty_pages();
-    let guest_memory = create_guest_memory(
-        vm_resources
-            .vm_config()
-            .mem_size_mib
-            .ok_or(MissingMemSizeConfig)?,
-        track_dirty_pages,
-    )?;
+    let guest_memory =
+        create_guest_memory(vm_resources.vm_config().mem_size_mib, track_dirty_pages)?;
     let vcpu_config = vm_resources.vcpu_config();
     let entry_addr = load_kernel(boot_config, &guest_memory)?;
     let initrd = load_initrd_from_config(boot_config, &guest_memory)?;
@@ -451,6 +451,7 @@ pub fn build_microvm_from_snapshot(
     guest_memory: GuestMemoryMmap,
     track_dirty_pages: bool,
     seccomp_filters: &BpfThreadMap,
+    vm_resources: &mut VmResources,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
     use self::StartMicrovmError::*;
     let vcpu_count = u8::try_from(microvm_state.vcpu_states.len())
@@ -518,12 +519,26 @@ pub fn build_microvm_from_snapshot(
         .map_err(MicrovmStateError::RestoreVmState)
         .map_err(RestoreMicrovmState)?;
 
+    vm_resources
+        .update_vm_config(&VmUpdateConfig {
+            vcpu_count: Some(vcpu_count),
+            mem_size_mib: Some(mem_size_mib(&guest_memory) as usize),
+            smt: Some(false),
+            cpu_template: None,
+            track_dirty_pages: Some(track_dirty_pages),
+        })
+        .map_err(SetVmResources)?;
+
     // Restore devices states.
     let mmio_ctor_args = MMIODevManagerConstructorArgs {
         mem: guest_memory,
         vm: vmm.vm.fd(),
         event_manager,
+        for_each_restored_device: VmResources::update_from_restored_device,
+        vm_resources,
+        instance_id: &instance_info.id,
     };
+
     vmm.mmio_device_manager =
         MMIODeviceManager::restore(mmio_ctor_args, &microvm_state.device_states)
             .map_err(MicrovmStateError::RestoreDevices)
@@ -984,6 +999,8 @@ pub mod tests {
     use devices::virtio::vsock::VSOCK_DEV_ID;
     use devices::virtio::{TYPE_BALLOON, TYPE_BLOCK, TYPE_VSOCK};
     use linux_loader::cmdline::Cmdline;
+    use mmds::data_store::{Mmds, MmdsVersion};
+    use mmds::ns::MmdsNetworkStack;
     use utils::tempfile::TempFile;
     use vm_memory::GuestMemory;
 
@@ -1123,6 +1140,26 @@ pub mod tests {
 
         let res = attach_net_devices(vmm, cmdline, net_builder.iter(), event_manager);
         assert!(res.is_ok());
+    }
+
+    pub(crate) fn insert_net_device_with_mmds(
+        vmm: &mut Vmm,
+        cmdline: &mut Cmdline,
+        event_manager: &mut EventManager,
+        net_config: NetworkInterfaceConfig,
+        mmds_version: MmdsVersion,
+    ) {
+        let mut net_builder = NetBuilder::new();
+        net_builder.build(net_config).unwrap();
+        let net = net_builder.iter().next().unwrap();
+        let mut mmds = Mmds::default();
+        mmds.set_version(mmds_version).unwrap();
+        net.lock().unwrap().configure_mmds_network_stack(
+            MmdsNetworkStack::default_ipv4_addr(),
+            Arc::new(Mutex::new(mmds)),
+        );
+
+        attach_net_devices(vmm, cmdline, net_builder.iter(), event_manager).unwrap();
     }
 
     pub(crate) fn insert_vsock_device(

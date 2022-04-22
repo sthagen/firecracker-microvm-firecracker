@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::token::{Error as TokenError, TokenAuthority};
-use crate::MAX_DATA_STORE_SIZE;
 use serde::{Deserialize, Serialize};
 use serde_json::{to_vec, Value};
 use std::fmt;
@@ -45,28 +44,6 @@ pub enum OutputFormat {
     Imds,
 }
 
-/// Keeps the MMDS version configuration.
-#[derive(Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct MmdsVersionType {
-    /// MMDS configured version
-    #[serde(default)]
-    pub version: MmdsVersion,
-}
-
-impl MmdsVersionType {
-    /// Returns the IMDS version.
-    pub fn version(&self) -> MmdsVersion {
-        self.version
-    }
-}
-
-impl From<MmdsVersion> for MmdsVersionType {
-    fn from(version: MmdsVersion) -> Self {
-        MmdsVersionType { version }
-    }
-}
-
 #[derive(Debug)]
 pub enum Error {
     DataStoreLimitExceeded,
@@ -91,18 +68,23 @@ impl fmt::Display for Error {
     }
 }
 
+// Used for ease of use in tests.
 impl Default for Mmds {
     fn default() -> Self {
-        Mmds {
-            data_store: Value::default(),
-            token_authority: None,
-            is_initialized: false,
-            data_store_limit: MAX_DATA_STORE_SIZE,
-        }
+        Self::default_with_limit(51200)
     }
 }
 
 impl Mmds {
+    pub fn default_with_limit(data_store_limit: usize) -> Self {
+        Mmds {
+            data_store: Value::default(),
+            token_authority: None,
+            is_initialized: false,
+            data_store_limit,
+        }
+    }
+
     /// This method is needed to check if data store is initialized.
     /// When a PATCH request is made on an uninitialized Mmds structure this method
     /// should return a NotFound error.
@@ -168,12 +150,17 @@ impl Mmds {
         self.data_store_limit = data_store_limit;
     }
 
-    // We do not check data_store size here because a request with a body
-    // bigger than the imposed limit will be stopped by micro_http before
-    // reaching here.
-    pub fn put_data(&mut self, data: Value) {
-        self.data_store = data;
-        self.is_initialized = true;
+    pub fn put_data(&mut self, data: Value) -> Result<(), Error> {
+        // It is safe to unwrap because any map keys are all strings and
+        // we are using default serializer which does not return error.
+        if to_vec(&data).unwrap().len() > self.data_store_limit {
+            Err(Error::DataStoreLimitExceeded)
+        } else {
+            self.data_store = data;
+            self.is_initialized = true;
+
+            Ok(())
+        }
     }
 
     pub fn patch_data(&mut self, patch_data: Value) -> Result<(), Error> {
@@ -193,11 +180,8 @@ impl Mmds {
     // We do not check size of data_store before returning a result because due
     // to limit from put/patch the data_store can not be bigger than the limit
     // imposed by the server.
-    pub fn get_data_str(&self) -> String {
-        if self.data_store.is_null() {
-            return String::from("{}");
-        }
-        self.data_store.to_string()
+    pub fn data_store_value(&self) -> Value {
+        self.data_store.clone()
     }
 
     /// Returns the serde::Value in IMDS format plaintext.
@@ -294,6 +278,15 @@ impl Mmds {
 mod tests {
     use super::*;
 
+    impl Mmds {
+        pub fn get_data_str(&self) -> String {
+            if self.data_store.is_null() {
+                return String::from("{}");
+            }
+            self.data_store.to_string()
+        }
+    }
+
     #[test]
     fn test_display_mmds_version() {
         assert_eq!(MmdsVersion::V1.to_string(), "V1");
@@ -328,7 +321,8 @@ mod tests {
 
         let mut mmds_json = "{\"meta-data\":{\"iam\":\"dummy\"},\"user-data\":\"1522850095\"}";
 
-        mmds.put_data(serde_json::from_str(mmds_json).unwrap());
+        mmds.put_data(serde_json::from_str(mmds_json).unwrap())
+            .unwrap();
         assert!(mmds.check_data_store_initialized().is_ok());
 
         assert_eq!(mmds.get_data_str(), mmds_json);
@@ -359,7 +353,7 @@ mod tests {
             "balance": -24
         }"#;
         let data_store: Value = serde_json::from_str(data).unwrap();
-        mmds.put_data(data_store);
+        mmds.put_data(data_store).unwrap();
 
         // Test invalid path.
         assert_eq!(
@@ -501,7 +495,6 @@ mod tests {
     #[test]
     fn test_update_data_store() {
         let mut mmds = Mmds::default();
-        mmds.set_data_store_limit(MAX_DATA_STORE_SIZE);
 
         let data = r#"{
             "name": {
@@ -511,7 +504,7 @@ mod tests {
             "age": "43"
         }"#;
         let data_store: Value = serde_json::from_str(data).unwrap();
-        mmds.put_data(data_store);
+        mmds.put_data(data_store).unwrap();
 
         let data = r#"{
             "name": {
@@ -531,7 +524,7 @@ mod tests {
             "age": 43
         }"#;
         let data_store: Value = serde_json::from_str(data).unwrap();
-        mmds.put_data(data_store);
+        mmds.put_data(data_store).unwrap();
 
         let data = r#"{
             "name": {
@@ -568,6 +561,22 @@ mod tests {
         assert!(mmds.patch_data(data_store).is_ok());
         assert!(mmds.get_data_str().contains("smth2"));
         assert_eq!(mmds.get_data_str().len(), 72);
+    }
+
+    #[test]
+    fn test_put_size_limit() {
+        let mut mmds = Mmds::default();
+        let filling = (0..51300).map(|_| "X").collect::<String>();
+        let data = "{\"key\": \"".to_string() + &filling + "\"}";
+
+        let data_store: Value = serde_json::from_str(&data).unwrap();
+
+        assert_eq!(
+            mmds.put_data(data_store).unwrap_err().to_string(),
+            Error::DataStoreLimitExceeded.to_string()
+        );
+
+        assert_eq!(mmds.get_data_str().len(), 2);
     }
 
     #[test]

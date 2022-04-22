@@ -151,6 +151,11 @@ impl BalloonBuilder {
         Ok(())
     }
 
+    /// Inserts an existing balloon device.
+    pub fn set_device(&mut self, balloon: MutexBalloon) {
+        self.inner = Some(balloon);
+    }
+
     /// Provides a reference to the Balloon if present.
     pub fn get(&self) -> Option<&MutexBalloon> {
         self.inner.as_ref()
@@ -247,5 +252,13 @@ pub(crate) mod tests {
 
         let err = StatsNotFound;
         let _ = format!("{}{:?}", err, err);
+    }
+
+    #[test]
+    fn test_set_device() {
+        let mut builder = BalloonBuilder::new();
+        let balloon = Balloon::new(0, true, 0, true).unwrap();
+        builder.set_device(Arc::new(Mutex::new(balloon)));
+        assert!(builder.inner.is_some());
     }
 }

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests the VSOCK throughput of Firecracker uVMs."""
 
-
 import os
 import json
 import logging
@@ -18,17 +17,21 @@ from framework.stats import core, consumer, producer
 from framework.stats.baseline import Provider as BaselineProvider
 from framework.stats.metadata import DictProvider as DictMetadataProvider
 from framework.utils import CpuMap, CmdBuilder, run_cmd, get_cpu_percent, \
-    DictQuery
-from framework.utils_cpuid import get_cpu_model_name
+    get_kernel_version, DictQuery
+from framework.utils_cpuid import get_cpu_model_name, get_instance_type
+from framework.utils_vsock import make_host_port_path, VSOCK_UDS_PATH
 import host_tools.network as net_tools
 from integration_tests.performance.configs import defs
-from integration_tests.performance.utils import handle_failure, \
-    dump_test_result
+from integration_tests.performance.utils import handle_failure
 
-CONFIG = json.load(open(defs.CFG_LOCATION /
-                        "vsock_throughput_test_config.json", encoding='utf-8'))
-SERVER_STARTUP_TIME = CONFIG["server_startup_time"]
-VSOCK_UDS_PATH = "v.sock"
+TEST_ID = "vsock_throughput"
+kernel_version = get_kernel_version(level=1)
+CONFIG_NAME_REL = "test_{}_config_{}.json".format(TEST_ID,
+                                                  kernel_version)
+CONFIG_NAME_ABS = os.path.join(defs.CFG_LOCATION, CONFIG_NAME_REL)
+CONFIG_DICT = json.load(open(CONFIG_NAME_ABS, encoding='utf-8'))
+
+SERVER_STARTUP_TIME = CONFIG_DICT["server_startup_time"]
 IPERF3 = "iperf3-vsock"
 THROUGHPUT = "throughput"
 DURATION = "duration"
@@ -56,7 +59,7 @@ class VsockThroughputBaselineProvider(BaselineProvider):
         cpu_model_name = get_cpu_model_name()
         baselines = list(filter(
             lambda cpu_baseline: cpu_baseline["model"] == cpu_model_name,
-            CONFIG["hosts"]["instances"]["m5d.metal"]["cpus"]))
+            CONFIG_DICT["hosts"]["instances"][get_instance_type()]["cpus"]))
         super().__init__(DictQuery({}))
         if len(baselines) > 0:
             super().__init__(DictQuery(baselines[0]))
@@ -124,13 +127,13 @@ def produce_iperf_output(basevm,
         # Bind the UDS in the jailer's root.
         basevm.create_jailed_resource(os.path.join(
             basevm.path,
-            _make_host_port_path(VSOCK_UDS_PATH, BASE_PORT + client_idx)))
+            make_host_port_path(VSOCK_UDS_PATH, BASE_PORT + client_idx)))
 
         pinned_cmd = f"taskset --cpu-list {client_idx % basevm.vcpus_count}" \
             f" {cmd}"
-        rc, stdout, _ = conn.execute_command(pinned_cmd)
+        rc, stdout, stderr = conn.execute_command(pinned_cmd)
 
-        assert rc == 0
+        assert rc == 0, stderr.read()
 
         return stdout.read()
 
@@ -209,21 +212,21 @@ def consume_iperf_output(cons, result):
 
 def pipes(basevm, current_avail_cpu, env_id):
     """Producer/Consumer pipes generator."""
-    for mode in CONFIG["modes"]:
+    for mode in CONFIG_DICT["modes"]:
         # We run bi-directional tests only on uVM with more than 2 vCPus
         # because we need to pin one iperf3/direction per vCPU, and since we
         # have two directions, we need at least two vCPUs.
         if mode == "bd" and basevm.vcpus_count < 2:
             continue
 
-        for protocol in CONFIG["protocols"]:
+        for protocol in CONFIG_DICT["protocols"]:
             for payload_length in protocol["payload_length"]:
                 iperf_guest_cmd_builder = CmdBuilder(IPERF3) \
                     .with_arg("--vsock") \
                     .with_arg("-c", 2)       \
                     .with_arg("--json") \
                     .with_arg("--omit", protocol["omit"]) \
-                    .with_arg("--time", CONFIG["time"])
+                    .with_arg("--time", CONFIG_DICT["time"])
 
                 if payload_length != "DEFAULT":
                     iperf_guest_cmd_builder = iperf_guest_cmd_builder \
@@ -233,7 +236,7 @@ def pipes(basevm, current_avail_cpu, env_id):
 
                 cons = consumer.LambdaConsumer(
                     metadata_provider=DictMetadataProvider(
-                        CONFIG["measurements"],
+                        CONFIG_DICT["measurements"],
                         VsockThroughputBaselineProvider(env_id, iperf3_id)),
                     func=consume_iperf_output
                 )
@@ -242,10 +245,10 @@ def pipes(basevm, current_avail_cpu, env_id):
                     "guest_cmd_builder": iperf_guest_cmd_builder,
                     "basevm": basevm,
                     "current_avail_cpu": current_avail_cpu,
-                    "runtime": CONFIG["time"],
+                    "runtime": CONFIG_DICT["time"],
                     "omit": protocol["omit"],
-                    "load_factor": CONFIG["load_factor"],
-                    "modes": CONFIG["modes"][mode],
+                    "load_factor": CONFIG_DICT["load_factor"],
+                    "modes": CONFIG_DICT["modes"][mode],
                 }
                 prod = producer.LambdaProducer(produce_iperf_output,
                                                prod_kwargs)
@@ -253,27 +256,33 @@ def pipes(basevm, current_avail_cpu, env_id):
 
 
 @pytest.mark.nonci
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(1200)
+@pytest.mark.parametrize(
+    'results_file_dumper',
+    [CONFIG_NAME_ABS],
+    indirect=True
+)
 def test_vsock_throughput(bin_cloner_path, results_file_dumper):
     """
     Test vsock throughput for multiple vm configurations.
 
     @type: performance
     """
-    logger = logging.getLogger("vsock_throughput")
+    logger = logging.getLogger(TEST_ID)
     artifacts = ArtifactCollection(_test_images_s3_bucket())
     microvm_artifacts = ArtifactSet(artifacts.microvms(keyword="1vcpu_1024mb"))
     microvm_artifacts.insert(artifacts.microvms(keyword="2vcpu_1024mb"))
-    kernel_artifacts = ArtifactSet(
-        artifacts.kernels(keyword="vmlinux-4.14.bin"))
+    kernel_artifacts = ArtifactSet(artifacts.kernels())
     disk_artifacts = ArtifactSet(artifacts.disks(keyword="ubuntu"))
+
+    logger.info("Testing on processor %s", get_cpu_model_name())
 
     # Create a test context and add builder, logger, network.
     test_context = TestContext()
     test_context.custom = {
         'builder': MicrovmBuilder(bin_cloner_path),
         'logger': logger,
-        'name': 'vsock_throughput',
+        'name': TEST_ID,
         'results_file_dumper': results_file_dumper
     }
 
@@ -311,7 +320,7 @@ def iperf_workload(context):
 
     basevm.start()
 
-    st_core = core.Core(name="vsock_throughput",
+    st_core = core.Core(name=TEST_ID,
                         iterations=1,
                         custom={'cpu_model_name': get_cpu_model_name()})
 
@@ -350,9 +359,4 @@ def iperf_workload(context):
     except core.CoreException as err:
         handle_failure(file_dumper, err)
 
-    dump_test_result(file_dumper, result)
-
-
-def _make_host_port_path(uds_path, port):
-    """Build the path for a Unix socket, mapped to host vsock port `port`."""
-    return "{}_{}".format(uds_path, port)
+    file_dumper.dump(result)

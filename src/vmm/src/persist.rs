@@ -26,6 +26,7 @@ use crate::{Error as VmmError, EventManager, Vmm};
 #[cfg(target_arch = "x86_64")]
 use cpuid::common::{get_vendor_id_from_cpuid, get_vendor_id_from_host};
 
+use crate::resources::VmResources;
 use crate::vmm_config::instance_info::InstanceInfo;
 #[cfg(target_arch = "aarch64")]
 use arch::regs::{get_manufacturer_id_from_host, get_manufacturer_id_from_state};
@@ -96,11 +97,11 @@ impl Display for MicrovmStateError {
             IncompatibleState(msg) => write!(f, "Compatibility checks failed: {}", msg),
             InvalidInput => write!(f, "Provided MicroVM state is invalid."),
             NotAllowed(msg) => write!(f, "Operation not allowed: {}", msg),
-            RestoreDevices(err) => write!(f, "Cannot restore devices. Error: {:?}", err),
-            RestoreVcpuState(err) => write!(f, "Cannot restore Vcpu state. Error: {:?}", err),
-            RestoreVmState(err) => write!(f, "Cannot restore Vm state. Error: {:?}", err),
-            SaveVcpuState(err) => write!(f, "Cannot save Vcpu state. Error: {:?}", err),
-            SaveVmState(err) => write!(f, "Cannot save Vm state. Error: {:?}", err),
+            RestoreDevices(err) => write!(f, "Cannot restore devices: {:?}", err),
+            RestoreVcpuState(err) => write!(f, "Cannot restore Vcpu state: {:?}", err),
+            RestoreVmState(err) => write!(f, "Cannot restore Vm state: {:?}", err),
+            SaveVcpuState(err) => write!(f, "Cannot save Vcpu state: {:?}", err),
+            SaveVmState(err) => write!(f, "Cannot save Vm state: {:?}", err),
             SignalVcpu(err) => write!(f, "Cannot signal Vcpu: {:?}", err),
             UnexpectedVcpuResponse => write!(f, "Vcpu is in unexpected state."),
         }
@@ -439,6 +440,7 @@ pub fn restore_from_snapshot(
     seccomp_filters: &BpfThreadMap,
     params: &LoadSnapshotParams,
     version_map: VersionMap,
+    vm_resources: &mut VmResources,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, LoadSnapshotError> {
     use self::LoadSnapshotError::*;
     let track_dirty_pages = params.enable_diff_snapshots;
@@ -452,6 +454,7 @@ pub fn restore_from_snapshot(
         &microvm_state.memory_state,
         track_dirty_pages,
     )?;
+
     builder::build_microvm_from_snapshot(
         instance_info,
         event_manager,
@@ -459,6 +462,7 @@ pub fn restore_from_snapshot(
         guest_memory,
         track_dirty_pages,
         seccomp_filters,
+        vm_resources,
     )
     .map_err(BuildMicroVm)
 }

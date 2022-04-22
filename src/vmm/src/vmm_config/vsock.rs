@@ -77,6 +77,19 @@ impl VsockBuilder {
         Self { inner: None }
     }
 
+    /// Inserts an existing vsock device.
+    pub fn set_device(&mut self, device: Arc<Mutex<Vsock<VsockUnixBackend>>>) {
+        self.inner = Some(VsockAndUnixPath {
+            uds_path: device
+                .lock()
+                .expect("Poisoned lock")
+                .backend()
+                .host_sock_path()
+                .to_owned(),
+            vsock: device.clone(),
+        });
+    }
+
     /// Inserts a Unix backend Vsock in the store.
     /// If an entry already exists, it will overwrite it.
     pub fn insert(&mut self, cfg: VsockDeviceConfig) -> Result<()> {
@@ -178,5 +191,25 @@ pub(crate) mod tests {
             io::Error::from_raw_os_error(0),
         ));
         let _ = format!("{}{:?}", err, err);
+    }
+
+    #[test]
+    fn test_set_device() {
+        let mut vsock_builder = VsockBuilder::new();
+        let mut tmp_sock_file = TempFile::new().unwrap();
+        tmp_sock_file.remove().unwrap();
+        let vsock = Vsock::new(
+            0,
+            VsockUnixBackend::new(1, tmp_sock_file.as_path().to_str().unwrap().to_string())
+                .unwrap(),
+        )
+        .unwrap();
+
+        vsock_builder.set_device(Arc::new(Mutex::new(vsock)));
+        assert!(vsock_builder.inner.is_some());
+        assert_eq!(
+            vsock_builder.inner.unwrap().uds_path,
+            tmp_sock_file.as_path().to_str().unwrap().to_string()
+        )
     }
 }

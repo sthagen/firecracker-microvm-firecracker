@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import platform
 
 from retry.api import retry_call
 
@@ -14,17 +15,20 @@ import pytest
 from framework import utils
 from framework.artifacts import NetIfaceConfig
 from framework.utils import generate_mmds_session_token, \
-    generate_mmds_v2_get_request
+    generate_mmds_get_request
+from framework import utils_cpuid
 import host_tools.network as net_tools
 
 
-def _configure_vm_from_json(test_microvm, vm_config_file):
+def _configure_vm_from_json(test_microvm, vm_config_file, json_xform=None):
     """
     Configure a microvm using a file sent as command line parameter.
 
     Create resources needed for the configuration of the microvm and
     set as configuration file a copy of the file that was passed as
     parameter to this helper function.
+    Also apply a transformation fuction to the copy of the configuration
+    JSON if specified.
     """
     test_microvm.create_jailed_resource(test_microvm.kernel_file,
                                         create_jail=True)
@@ -38,9 +42,11 @@ def _configure_vm_from_json(test_microvm, vm_config_file):
     vm_config_path = os.path.join(test_microvm.path,
                                   os.path.basename(vm_config_file))
     with open(vm_config_file, encoding='utf-8') as f1:
+        vm_cfg_json = json.load(f1)
+        if json_xform is not None:
+            vm_cfg_json = json_xform(vm_cfg_json)
         with open(vm_config_path, "w", encoding='utf-8') as f2:
-            for line in f1:
-                f2.write(line)
+            json.dump(vm_cfg_json, f2)
     test_microvm.create_jailed_resource(vm_config_path, create_jail=True)
     test_microvm.jailer.extra_args = {'config-file': os.path.basename(
         vm_config_file)}
@@ -88,11 +94,7 @@ def _build_cmd_to_fetch_metadata(ssh_connection, version, ipv4_address):
     the `GET` request.
     """
     # Fetch data from MMDS from the guest's side.
-    if version == "V1":
-        cmd = 'curl -s -H "Accept: application/json" '
-        cmd += 'http://{}'.format(ipv4_address)
-
-    else:
+    if version == "V2":
         # If MMDS is configured to version 2, so we need to create
         # the session token first.
         token = generate_mmds_session_token(
@@ -100,9 +102,10 @@ def _build_cmd_to_fetch_metadata(ssh_connection, version, ipv4_address):
             ipv4_address,
             token_ttl=60
         )
-        cmd = generate_mmds_v2_get_request(ipv4_address, token)
+    else:
+        token = None
 
-    return cmd
+    return generate_mmds_get_request(ipv4_address, token)
 
 
 def _get_optional_fields_from_file(vm_config_file):
@@ -189,6 +192,75 @@ def test_config_start_no_api(test_microvm_with_api, vm_config_file):
         exceptions=RuntimeError,
         tries=10,
         delay=1)
+
+
+@pytest.mark.parametrize(
+    "vm_config_file",
+    [
+        "framework/vm_config_missing_vcpu_count.json",
+        "framework/vm_config_missing_mem_size_mib.json"
+    ]
+)
+def test_config_bad_machine_config(test_microvm_with_api, vm_config_file):
+    """
+    Test microvm start when the `machine_config` is invalid.
+
+    @type: functional
+    """
+    test_microvm = test_microvm_with_api
+
+    _configure_vm_from_json(test_microvm, vm_config_file)
+    test_microvm.jailer.extra_args.update({'no-api': None})
+
+    test_microvm.spawn()
+
+    test_microvm.check_log_message(
+        "Configuration for VMM from one single json failed"
+    )
+
+
+@pytest.mark.parametrize(
+    "test_config",
+    [
+        ("framework/vm_config_cpu_template_C3.json", False, True, True),
+        ("framework/vm_config_smt_true.json", False, False, True),
+    ]
+)
+def test_config_machine_config_params(test_microvm_with_api, test_config):
+    """
+    Test microvm start with optional `machine_config` parameters.
+
+    @type: functional
+    """
+    test_microvm = test_microvm_with_api
+
+    # Test configuration determines if the file is a valid config or not
+    # based on the CPU
+    (vm_config_file, fail_intel, fail_amd, fail_aarch64) = test_config
+
+    _configure_vm_from_json(test_microvm, vm_config_file)
+    test_microvm.jailer.extra_args.update({'no-api': None})
+
+    test_microvm.spawn()
+
+    cpu_vendor = utils_cpuid.get_cpu_vendor()
+
+    check_for_failed_start = (
+        (cpu_vendor == utils_cpuid.CpuVendor.AMD and fail_amd) or
+        (cpu_vendor == utils_cpuid.CpuVendor.INTEL and fail_intel) or
+        (platform.machine() == "aarch64" and fail_aarch64)
+    )
+
+    if check_for_failed_start:
+        test_microvm.check_any_log_message(
+            ["Building VMM configured from cmdline json failed: ",
+             "Configuration for VMM from one single json failed"]
+        )
+    else:
+        test_microvm.check_log_message(
+            "Successfully started microvm that was configured "
+            "from one single json"
+        )
 
 
 @pytest.mark.parametrize(
@@ -304,6 +376,48 @@ def test_start_with_metadata(test_microvm_with_api):
         assert response.json() == json.load(json_file)
 
 
+def test_start_with_metadata_limit(test_microvm_with_api):
+    """
+    Test that the metadata size limit is enforced when populating from a file.
+
+    @type: negative
+    """
+    test_microvm = test_microvm_with_api
+    test_microvm.jailer.extra_args.update(
+        {"mmds-size-limit": "30"})
+
+    metadata_file = "../resources/tests/metadata.json"
+
+    _add_metadata_file(test_microvm, metadata_file)
+
+    test_microvm.spawn()
+
+    test_microvm.check_log_message(
+        "Populating MMDS from file failed: DataStoreLimitExceeded"
+    )
+
+
+def test_start_with_metadata_default_limit(test_microvm_with_api):
+    """
+    Test that the metadata size limit defaults to the api payload limit.
+
+    @type: negative
+    """
+    test_microvm = test_microvm_with_api
+    test_microvm.jailer.extra_args.update(
+        {"http-api-max-payload-size": "30"})
+
+    metadata_file = "../resources/tests/metadata.json"
+
+    _add_metadata_file(test_microvm, metadata_file)
+
+    test_microvm.spawn()
+
+    test_microvm.check_log_message(
+        "Populating MMDS from file failed: DataStoreLimitExceeded"
+    )
+
+
 def test_start_with_missing_metadata(test_microvm_with_api):
     """
     Test if a microvm is configured with a missing metadata file.
@@ -319,15 +433,15 @@ def test_start_with_missing_metadata(test_microvm_with_api):
     )
     test_microvm.metadata_file = vm_metadata_path
 
-    # This will be a FileNotFound on the firecracker socket
-    # and not the metadata file
-    with pytest.raises(FileNotFoundError):
+    try:
         test_microvm.spawn()
-
-    test_microvm.check_log_message(
-        "Unable to open or read from the mmds content file"
-    )
-    test_microvm.check_log_message("No such file or directory")
+    except FileNotFoundError:
+        pass
+    finally:
+        test_microvm.check_log_message(
+            "Unable to open or read from the mmds content file"
+        )
+        test_microvm.check_log_message("No such file or directory")
 
 
 def test_start_with_invalid_metadata(test_microvm_with_api):
@@ -346,15 +460,17 @@ def test_start_with_invalid_metadata(test_microvm_with_api):
     shutil.copy(metadata_file, vm_metadata_path)
     test_microvm.metadata_file = vm_metadata_path
 
-    with pytest.raises(FileNotFoundError):
+    try:
         test_microvm.spawn()
-
-    test_microvm.check_log_message(
-        "MMDS error: metadata provided not valid json"
-    )
-    test_microvm.check_log_message(
-        "EOF while parsing an object"
-    )
+    except FileNotFoundError:
+        pass
+    finally:
+        test_microvm.check_log_message(
+            "MMDS error: metadata provided not valid json"
+        )
+        test_microvm.check_log_message(
+            "EOF while parsing an object"
+        )
 
 
 @pytest.mark.parametrize(

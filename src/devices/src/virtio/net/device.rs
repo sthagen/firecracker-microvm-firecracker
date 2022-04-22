@@ -19,6 +19,7 @@ use crate::{report_net_event_fail, Error as DeviceError};
 use dumbo::pdu::ethernet::EthernetFrame;
 use libc::EAGAIN;
 use logger::{error, warn, IncMetric, METRICS};
+use mmds::data_store::Mmds;
 use mmds::ns::MmdsNetworkStack;
 use rate_limiter::{BucketUpdate, RateLimiter, TokenType};
 #[cfg(not(test))]
@@ -26,7 +27,7 @@ use std::io;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::{cmp, mem, result};
 use utils::eventfd::EventFd;
 use utils::net::mac::{MacAddr, MAC_ADDR_LEN};
@@ -122,7 +123,7 @@ pub struct Net {
     pub(crate) device_state: DeviceState,
     pub(crate) activate_evt: EventFd,
 
-    pub(crate) mmds_ns: Option<MmdsNetworkStack>,
+    pub mmds_ns: Option<MmdsNetworkStack>,
 
     #[cfg(test)]
     pub(crate) mocks: Mocks,
@@ -136,7 +137,6 @@ impl Net {
         guest_mac: Option<&MacAddr>,
         rx_rate_limiter: RateLimiter,
         tx_rate_limiter: RateLimiter,
-        allow_mmds_requests: bool,
     ) -> Result<Self> {
         let tap = Tap::open_named(&tap_if_name).map_err(Error::TapOpen)?;
 
@@ -167,17 +167,12 @@ impl Net {
         }
 
         let mut queue_evts = Vec::new();
-        for _ in QUEUE_SIZES.iter() {
+        let mut queues = Vec::new();
+        for &size in QUEUE_SIZES {
             queue_evts.push(EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?);
+            queues.push(Queue::new(size));
         }
 
-        let queues = QUEUE_SIZES.iter().map(|&s| Queue::new(s)).collect();
-
-        let mmds_ns = if allow_mmds_requests {
-            Some(MmdsNetworkStack::new_with_defaults(None))
-        } else {
-            None
-        };
         Ok(Net {
             id,
             tap,
@@ -197,7 +192,7 @@ impl Net {
             device_state: DeviceState::Inactive,
             activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?,
             config_space,
-            mmds_ns,
+            mmds_ns: None,
             guest_mac: guest_mac.copied(),
 
             #[cfg(test)]
@@ -220,13 +215,18 @@ impl Net {
         self.tap.if_name_as_str().to_string()
     }
 
+    /// Provides the MmdsNetworkStack of this net device.
+    pub fn mmds_ns(&self) -> Option<&MmdsNetworkStack> {
+        self.mmds_ns.as_ref()
+    }
+
     /// Configures the `MmdsNetworkStack` to allow device to forward MMDS requests.
     /// If the device already supports MMDS, updates the IPv4 address.
-    pub fn configure_mmds_network_stack(&mut self, ipv4_addr: Ipv4Addr) {
+    pub fn configure_mmds_network_stack(&mut self, ipv4_addr: Ipv4Addr, mmds: Arc<Mutex<Mmds>>) {
         if let Some(mmds_ns) = self.mmds_ns.as_mut() {
             mmds_ns.set_ipv4_addr(ipv4_addr);
         } else {
-            self.mmds_ns = Some(MmdsNetworkStack::new_with_defaults(Some(ipv4_addr)))
+            self.mmds_ns = Some(MmdsNetworkStack::new_with_defaults(Some(ipv4_addr), mmds))
         }
     }
 

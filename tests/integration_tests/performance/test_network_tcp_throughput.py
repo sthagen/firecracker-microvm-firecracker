@@ -4,14 +4,14 @@
 
 import json
 import logging
+import os
 import time
 import concurrent.futures
 import pytest
 
 from conftest import _test_images_s3_bucket
 from integration_tests.performance.configs import defs
-from integration_tests.performance.utils import handle_failure, \
-    dump_test_result
+from integration_tests.performance.utils import handle_failure
 from framework.artifacts import ArtifactCollection, ArtifactSet, \
     DEFAULT_HOST_IP
 from framework.matrix import TestMatrix, TestContext
@@ -19,10 +19,16 @@ from framework.builder import MicrovmBuilder
 from framework.stats import core, consumer, producer
 from framework.stats.baseline import Provider as BaselineProvider
 from framework.stats.metadata import DictProvider as DictMetadataProvider
-from framework.utils import CpuMap, CmdBuilder, run_cmd, get_cpu_percent, \
-    DictQuery
-from framework.utils_cpuid import get_cpu_model_name
+from framework.utils import get_cpu_percent, get_kernel_version,\
+    run_cmd, CpuMap, CmdBuilder, DictQuery
+from framework.utils_cpuid import get_cpu_model_name, get_instance_type
 import host_tools.network as net_tools
+
+TEST_ID = "network_tcp_throughput"
+kernel_version = get_kernel_version(level=1)
+CONFIG_NAME_REL = "test_{}_config_{}.json".format(TEST_ID, kernel_version)
+CONFIG_NAME_ABS = os.path.join(defs.CFG_LOCATION, CONFIG_NAME_REL)
+CONFIG_DICT = json.load(open(CONFIG_NAME_ABS, encoding='utf-8'))
 
 DEBUG = False
 IPERF3 = "iperf3"
@@ -39,12 +45,6 @@ IPERF3_END_RESULTS_TAG = "end"
 DEBUG_CPU_UTILIZATION_VMM_SAMPLES_TAG = "cpu_utilization_vmm_samples"
 DELTA_PERCENTAGE_TAG = "delta_percentage"
 TARGET_TAG = "target"
-CONFIG = json.load(
-    open(
-        defs.CFG_LOCATION / "network_tcp_throughput_test_config.json",
-        encoding='utf-8'
-    )
-)
 
 
 # pylint: disable=R0903
@@ -59,7 +59,7 @@ class NetTCPThroughputBaselineProvider(BaselineProvider):
         cpu_model_name = get_cpu_model_name()
         baselines = list(filter(
             lambda cpu_baseline: cpu_baseline["model"] == cpu_model_name,
-            CONFIG["hosts"]["instances"]["m5d.metal"]["cpus"]))
+            CONFIG_DICT["hosts"]["instances"][get_instance_type()]["cpus"]))
 
         super().__init__(DictQuery({}))
         if len(baselines) > 0:
@@ -245,7 +245,7 @@ def create_pipes_generator(basevm,
             iperf_guest_cmd_builder = CmdBuilder(IPERF3) \
                 .with_arg("--verbose") \
                 .with_arg("--client", host_ip) \
-                .with_arg("--time", CONFIG["time"]) \
+                .with_arg("--time", CONFIG_DICT["time"]) \
                 .with_arg("--json") \
                 .with_arg("--omit", protocol["omit"])
 
@@ -261,7 +261,7 @@ def create_pipes_generator(basevm,
 
             cons = consumer.LambdaConsumer(
                 metadata_provider=DictMetadataProvider(
-                    measurements=CONFIG["measurements"],
+                    measurements=CONFIG_DICT["measurements"],
                     baseline_provider=NetTCPThroughputBaselineProvider(
                         env_id, iperf3_id)),
                 func=consume_iperf_tcp_output,
@@ -272,10 +272,10 @@ def create_pipes_generator(basevm,
                 "guest_cmd_builder": iperf_guest_cmd_builder,
                 "basevm": basevm,
                 "current_avail_cpu": current_avail_cpu,
-                "runtime": CONFIG["time"],
+                "runtime": CONFIG_DICT["time"],
                 "omit": protocol["omit"],
-                "load_factor": CONFIG["load_factor"],
-                "modes": CONFIG["modes"][mode]
+                "load_factor": CONFIG_DICT["load_factor"],
+                "modes": CONFIG_DICT["modes"][mode]
             }
             prod = producer.LambdaProducer(produce_iperf_output,
                                            prod_kwargs)
@@ -284,14 +284,14 @@ def create_pipes_generator(basevm,
 
 def pipes(basevm, host_ip, current_avail_cpu, env_id):
     """Pipes generator."""
-    for mode in CONFIG["modes"]:
+    for mode in CONFIG_DICT["modes"]:
         # We run bi-directional tests only on uVM with more than 2 vCPus
         # because we need to pin one iperf3/direction per vCPU, and since we
         # have two directions, we need at least two vCPUs.
         if mode == "bd" and basevm.vcpus_count < 2:
             continue
 
-        for protocol in CONFIG["protocols"]:
+        for protocol in CONFIG_DICT["protocols"]:
             # Distribute modes evenly between producers and consumers.
             pipes_generator = create_pipes_generator(basevm,
                                                      mode,
@@ -306,25 +306,32 @@ def pipes(basevm, host_ip, current_avail_cpu, env_id):
 
 @pytest.mark.nonci
 @pytest.mark.timeout(3600)
+@pytest.mark.parametrize(
+    'results_file_dumper',
+    [CONFIG_NAME_ABS],
+    indirect=True
+)
 def test_network_tcp_throughput(bin_cloner_path, results_file_dumper):
     """
     Test network throughput for multiple vm confgurations.
 
     @type: performance
     """
-    logger = logging.getLogger("network_tcp_throughput")
+    logger = logging.getLogger(TEST_ID)
     artifacts = ArtifactCollection(_test_images_s3_bucket())
-    microvm_artifacts = ArtifactSet(artifacts.microvms(keyword="2vcpu_1024mb"))
-    microvm_artifacts.insert(artifacts.microvms(keyword="1vcpu_1024mb"))
+    microvm_artifacts = ArtifactSet(artifacts.microvms(keyword="1vcpu_1024mb"))
+    microvm_artifacts.insert(artifacts.microvms(keyword="2vcpu_1024mb"))
     kernel_artifacts = ArtifactSet(artifacts.kernels())
     disk_artifacts = ArtifactSet(artifacts.disks(keyword="ubuntu"))
+
+    logger.info("Testing on processor %s", get_cpu_model_name())
 
     # Create a test context and add builder, logger, network.
     test_context = TestContext()
     test_context.custom = {
         'builder': MicrovmBuilder(bin_cloner_path),
         'logger': logger,
-        'name': 'network_tcp_throughput',
+        'name': TEST_ID,
         'results_file_dumper': results_file_dumper
     }
 
@@ -360,7 +367,7 @@ def iperf_workload(context):
         "disk": context.disk.name(),
         "cpu_model_name": get_cpu_model_name()
     }
-    st_core = core.Core(name="network_tcp_throughput",
+    st_core = core.Core(name=TEST_ID,
                         iterations=1,
                         custom=custom)
 
@@ -400,4 +407,4 @@ def iperf_workload(context):
     except core.CoreException as err:
         handle_failure(file_dumper, err)
 
-    dump_test_result(file_dumper, result)
+    file_dumper.dump(result)

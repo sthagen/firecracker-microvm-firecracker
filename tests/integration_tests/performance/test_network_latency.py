@@ -1,6 +1,7 @@
 # Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Tests the network latency of a Firecracker guest."""
+
 import logging
 import platform
 import re
@@ -12,17 +13,32 @@ from framework.matrix import TestMatrix, TestContext
 from framework.builder import MicrovmBuilder
 from framework.stats import core, consumer, producer, types, criteria,\
     function
-from framework.utils import eager_map, CpuMap
+from framework.utils import eager_map, get_kernel_version, CpuMap
 from framework.artifacts import DEFAULT_HOST_IP
 from framework.utils_cpuid import get_cpu_model_name
-from integration_tests.performance.utils import handle_failure, \
-    dump_test_result
+from integration_tests.performance.utils import handle_failure
 
 PING = "ping -c {} -i {} {}"
 LATENCY_AVG_BASELINES = {
     "x86_64": {
-        "target": 0.250,  # milliseconds
-        "delta": 0.020  # milliseconds
+        "4.14": {
+            "target": 0.240,  # milliseconds
+            "delta": 0.040  # milliseconds
+        },
+        "5.10": {
+            "target": 0.250,  # milliseconds
+            "delta": 0.020  # milliseconds
+        }
+    },
+    "aarch64": {
+        "4.14": {
+            "target": 0.039,  # milliseconds
+            "delta": 0.020  # milliseconds
+        },
+        "5.10": {
+            "target": 0.034,  # milliseconds
+            "delta": 0.020  # milliseconds
+        }
     }
 }
 
@@ -33,8 +49,10 @@ LATENCY = "latency"
 
 def pass_criteria():
     """Define pass criteria for the statistics."""
+    arch = platform.machine()
+    host_kernel = get_kernel_version(level=1)
     return {
-        "Avg": criteria.EqualWith(LATENCY_AVG_BASELINES[platform.machine()])
+        "Avg": criteria.EqualWith(LATENCY_AVG_BASELINES[arch][host_kernel])
     }
 
 
@@ -85,7 +103,7 @@ def consume_ping_output(cons, raw_data, requests):
 
     # E.g: round-trip min/avg/max/stddev = 17.478/17.705/17.808/0.210 ms
     stat_values = output[-1]
-    pattern_stats = "round-trip min/avg/max/stddev = (.+)/(.+)/(.+)/(.+) ms"
+    pattern_stats = "min/avg/max/[a-z]+dev = (.+)/(.+)/(.+)/(.+) ms"
     stat_values = re.findall(pattern_stats, stat_values)[0]
     assert len(stat_values) == 4
 
@@ -126,9 +144,6 @@ def consume_ping_output(cons, raw_data, requests):
 
 
 @pytest.mark.nonci
-@pytest.mark.skipif(platform.machine() != "x86_64",
-                    reason="This test was observed only on x86_64. Further "
-                           "support need to be added for aarch64 and amd64.")
 @pytest.mark.timeout(3600)
 def test_network_latency(bin_cloner_path, results_file_dumper):
     """
@@ -213,6 +228,9 @@ def _g2h_send_ping(context):
               "cpu_model_name": get_cpu_model_name()}
 
     st_core = core.Core(name="network_latency", iterations=1, custom=custom)
+    env_id = f"{context.kernel.name()}/{context.disk.name()}/" \
+             f"{context.microvm.name()}"
+
     cons = consumer.LambdaConsumer(
         func=consume_ping_output,
         func_kwargs={"requests": context.custom['requests']}
@@ -222,7 +240,8 @@ def _g2h_send_ping(context):
                       DEFAULT_HOST_IP)
     prod = producer.SSHCommand(cmd,
                                net_tools.SSHConnection(basevm.ssh_config))
-    st_core.add_pipe(producer=prod, consumer=cons, tag="ping")
+
+    st_core.add_pipe(producer=prod, consumer=cons, tag=f"{env_id}/ping")
 
     # Gather results and verify pass criteria.
     try:
@@ -230,4 +249,4 @@ def _g2h_send_ping(context):
     except core.CoreException as err:
         handle_failure(file_dumper, err)
 
-    dump_test_result(file_dumper, result)
+    file_dumper.dump(result)
