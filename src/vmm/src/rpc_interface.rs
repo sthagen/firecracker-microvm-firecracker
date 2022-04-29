@@ -32,8 +32,8 @@ use crate::vmm_config::net::{
 use crate::vmm_config::snapshot::{CreateSnapshotParams, LoadSnapshotParams, SnapshotType};
 use crate::vmm_config::vsock::{VsockConfigError, VsockDeviceConfig};
 use crate::vmm_config::{self, RateLimiterUpdate};
+use crate::FcExitCode;
 use crate::{builder::StartMicrovmError, warn, EventManager};
-use crate::{ExitCode, FC_EXIT_CODE_BAD_CONFIGURATION};
 use logger::{error, info, update_metric_with_elapsed_time, METRICS};
 use mmds::data_store::{self, Mmds};
 use seccompiler::BpfThreadMap;
@@ -282,7 +282,7 @@ pub struct PrebootApiController<'a> {
     boot_path: bool,
     // Some PrebootApiRequest errors are irrecoverable and Firecracker
     // should cleanly teardown if they occur.
-    fatal_error: Option<ExitCode>,
+    fatal_error: Option<FcExitCode>,
 }
 
 impl MmdsRequestHandler for PrebootApiController<'_> {
@@ -325,7 +325,7 @@ impl<'a> PrebootApiController<'a> {
         boot_timer_enabled: bool,
         mmds_size_limit: usize,
         metadata_json: Option<&str>,
-    ) -> result::Result<(VmResources, Arc<Mutex<Vmm>>), ExitCode>
+    ) -> result::Result<(VmResources, Arc<Mutex<Vmm>>), FcExitCode>
     where
         F: Fn() -> VmmAction,
         G: Fn(ActionResult),
@@ -350,7 +350,7 @@ impl<'a> PrebootApiController<'a> {
                 )
                 .map_err(|err| {
                     error!("Populating MMDS from file failed: {:?}", err);
-                    crate::FC_EXIT_CODE_GENERIC_ERROR
+                    crate::FcExitCode::GenericError
                 })?;
 
             info!("Successfully added metadata to mmds from file");
@@ -549,7 +549,7 @@ impl<'a> PrebootApiController<'a> {
         })
         .map_err(|e| {
             // The process is too dirty to recover at this point.
-            self.fatal_error = Some(FC_EXIT_CODE_BAD_CONFIGURATION);
+            self.fatal_error = Some(FcExitCode::BadConfiguration);
             VmmActionError::LoadSnapshot(e)
         });
 
@@ -803,6 +803,7 @@ mod tests {
     use devices::virtio::VsockError;
     use seccompiler::BpfThreadMap;
 
+    use crate::vmm_config::snapshot::{MemBackendConfig, MemBackendType};
     use mmds::data_store::MmdsVersion;
     use std::path::PathBuf;
 
@@ -1604,7 +1605,10 @@ mod tests {
         // Without resume.
         let req = VmmAction::LoadSnapshot(LoadSnapshotParams {
             snapshot_path: PathBuf::new(),
-            mem_file_path: PathBuf::new(),
+            mem_backend: MemBackendConfig {
+                backend_type: MemBackendType::File,
+                backend_path: PathBuf::new(),
+            },
             enable_diff_snapshots: false,
             resume_vm: false,
         });
@@ -1617,7 +1621,10 @@ mod tests {
         // With resume.
         let req = VmmAction::LoadSnapshot(LoadSnapshotParams {
             snapshot_path: PathBuf::new(),
-            mem_file_path: PathBuf::new(),
+            mem_backend: MemBackendConfig {
+                backend_type: MemBackendType::File,
+                backend_path: PathBuf::new(),
+            },
             enable_diff_snapshots: false,
             resume_vm: true,
         });
@@ -2025,7 +2032,10 @@ mod tests {
         check_runtime_request_err(
             VmmAction::LoadSnapshot(LoadSnapshotParams {
                 snapshot_path: PathBuf::new(),
-                mem_file_path: PathBuf::new(),
+                mem_backend: MemBackendConfig {
+                    backend_type: MemBackendType::File,
+                    backend_path: PathBuf::new(),
+                },
                 enable_diff_snapshots: false,
                 resume_vm: false,
             }),
@@ -2044,7 +2054,10 @@ mod tests {
         // Load snapshot should no longer be allowed.
         let req = VmmAction::LoadSnapshot(LoadSnapshotParams {
             snapshot_path: PathBuf::new(),
-            mem_file_path: PathBuf::new(),
+            mem_backend: MemBackendConfig {
+                backend_type: MemBackendType::File,
+                backend_path: PathBuf::new(),
+            },
             enable_diff_snapshots: false,
             resume_vm: false,
         });
