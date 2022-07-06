@@ -52,18 +52,12 @@ pub trait DeviceInfoForFDT {
 }
 
 /// Errors thrown while configuring the Flattened Device Tree for aarch64.
-#[derive(Debug)]
+#[derive(Debug, derive_more::From)]
 pub enum Error {
     CreateFdt(VmFdtError),
     ReadCacheInfo(String),
     /// Failure in writing FDT in memory.
     WriteFdtToMemory(GuestMemoryError),
-}
-
-impl From<VmFdtError> for Error {
-    fn from(e: VmFdtError) -> Self {
-        Error::CreateFdt(e)
-    }
 }
 
 type Result<T> = result::Result<T, Error>;
@@ -111,9 +105,7 @@ pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug, S: std::hash::BuildHasher
 
     // Write FDT to memory.
     let fdt_address = GuestAddress(get_fdt_addr(&guest_mem));
-    guest_mem
-        .write_slice(fdt_final.as_slice(), fdt_address)
-        .map_err(Error::WriteFdtToMemory)?;
+    guest_mem.write_slice(fdt_final.as_slice(), fdt_address)?;
     Ok(fdt_final)
 }
 
@@ -126,7 +118,7 @@ fn create_cpu_nodes(fdt: &mut FdtWriter, vcpu_mpidr: &[u64]) -> Result<()> {
     let mut non_l1_caches: Vec<CacheEntry> = Vec::new();
     // We use sysfs for extracting the cache information.
     read_cache_config(&mut l1_caches, &mut non_l1_caches)
-        .map_err(|e| Error::ReadCacheInfo(e.to_string()))?;
+        .map_err(|err| Error::ReadCacheInfo(err.to_string()))?;
 
     // See https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/arm/cpus.yaml.
     let cpus = fdt.begin_node("cpus")?;

@@ -156,10 +156,10 @@ impl<T: Serialize> Metrics<T> {
                         // flushes automatically whenever a newline is
                         // detected (and we always end with a newline the
                         // current write).
-                        return guard
+                        guard
                             .write_all(&(format!("{}\n", msg)).as_bytes())
                             .map_err(MetricsError::Write)
-                            .map(|_| true);
+                            .map(|_| true)
                     } else {
                         // We have not incremented `missed_metrics_count` as there is no way to push
                         // metrics if destination lock got poisoned.
@@ -169,14 +169,13 @@ impl<T: Serialize> Metrics<T> {
                         );
                     }
                 }
-                Err(e) => {
-                    return Err(MetricsError::Serde(e.to_string()));
-                }
+                Err(err) => Err(MetricsError::Serde(err.to_string())),
             }
+        } else {
+            // If the metrics are not initialized, no error is thrown but we do let the user know
+            // that metrics were not written.
+            Ok(false)
         }
-        // If the metrics are not initialized, no error is thrown but we do let the user know that
-        // metrics were not written.
-        Ok(false)
     }
 }
 
@@ -204,12 +203,12 @@ pub enum MetricsError {
 impl fmt::Display for MetricsError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let printable = match *self {
-            MetricsError::NeverInitialized(ref e) => e.to_string(),
+            MetricsError::NeverInitialized(ref err) => err.to_string(),
             MetricsError::AlreadyInitialized => {
                 "Reinitialization of metrics not allowed.".to_string()
             }
-            MetricsError::Serde(ref e) => e.to_string(),
-            MetricsError::Write(ref e) => format!("Failed to write metrics: {}", e),
+            MetricsError::Serde(ref err) => err.to_string(),
+            MetricsError::Write(ref err) => format!("Failed to write metrics: {}", err),
         };
         write!(f, "{}", printable)
     }

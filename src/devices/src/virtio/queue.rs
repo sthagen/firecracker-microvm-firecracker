@@ -26,7 +26,7 @@ pub(super) const VIRTQ_DESC_F_WRITE: u16 = 0x2;
 // The Virtio Spec 1.0 defines the alignment of VirtIO descriptor is 16 bytes,
 // which fulfills the explicit constraint of GuestMemoryMmap::read_obj_from_addr().
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::From)]
 pub enum QueueError {
     /// Descriptor index out of bounds.
     DescIndexOutOfBounds(u16),
@@ -40,10 +40,10 @@ impl fmt::Display for QueueError {
 
         match &*self {
             DescIndexOutOfBounds(val) => write!(f, "Descriptor index out of bounds: {}", val),
-            UsedRing(e) => write!(
+            UsedRing(err) => write!(
                 f,
                 "Failed to write value into the virtio queue used ring: {}",
-                e
+                err
             ),
         }
     }
@@ -401,12 +401,10 @@ impl Queue {
         let next_used = u64::from(self.next_used.0 % self.actual_size());
         let used_elem = used_ring.unchecked_add(4 + next_used * 8);
 
-        mem.write_obj(u32::from(desc_index), used_elem)
-            .map_err(QueueError::UsedRing)?;
+        mem.write_obj(u32::from(desc_index), used_elem)?;
 
         let len_addr = used_elem.unchecked_add(4);
-        mem.write_obj(len as u32, len_addr)
-            .map_err(QueueError::UsedRing)?;
+        mem.write_obj(len as u32, len_addr)?;
 
         self.num_added += Wrapping(1);
         self.next_used += Wrapping(1);
