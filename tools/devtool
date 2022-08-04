@@ -72,7 +72,7 @@
 DEVCTR_IMAGE_NO_TAG="public.ecr.aws/firecracker/fcuvm"
 
 # Development container tag
-DEVCTR_IMAGE_TAG="v40"
+DEVCTR_IMAGE_TAG="v41"
 
 # Development container image (name:tag)
 # This should be updated whenever we upgrade the development container.
@@ -683,9 +683,9 @@ cmd_help() {
     echo "                              (in this particular order) required for the git authentication."
     echo "                              It is mandatory that both keys are specified."
     echo ""
-    echo "    build_devctr [--no-python-package-update]"
+    echo "    build_devctr [--no-python-package-upgrade]"
     echo "        Builds the development container from its Dockerfile."
-    echo "        -n, --no-python-package-update  Do not update python packages."
+    echo "        -n, --no-python-package-upgrade  Do not update python packages."
     echo ""
     echo "    build_kernel -c|--config [-n|--nproc]"
     echo "        Builds a kernel image custom-tailored for our CI."
