@@ -483,7 +483,7 @@ impl<'a> PrebootApiController<'a> {
     fn set_boot_source(&mut self, cfg: BootSourceConfig) -> ActionResult {
         self.boot_path = true;
         self.vm_resources
-            .set_boot_source(cfg)
+            .build_boot_source(cfg)
             .map(|()| VmmData::Empty)
             .map_err(VmmActionError::BootSource)
     }
@@ -925,7 +925,7 @@ mod tests {
             Ok(())
         }
 
-        pub fn set_boot_source(
+        pub fn build_boot_source(
             &mut self,
             _: BootSourceConfig,
         ) -> Result<(), BootSourceConfigError> {
