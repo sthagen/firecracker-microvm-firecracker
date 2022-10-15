@@ -13,7 +13,7 @@ use kvm_ioctls::{Kvm, VcpuFd};
 /// MSR related errors.
 pub enum Error {
     /// A FamStructWrapper operation has failed.
-    FamError(utils::fam::Error),
+    Fam(utils::fam::Error),
     /// Getting supported MSRs failed.
     GetSupportedModelSpecificRegisters(kvm_ioctls::Error),
     /// Setting up MSRs failed.
@@ -247,8 +247,8 @@ static ALLOWED_MSR_RANGES: &[MsrRange] = &[
 ///
 /// * `index` - The index of the MSR that is checked whether it's needed for serialization.
 pub fn msr_should_serialize(index: u32) -> bool {
-    // Denied MSRs not exported by Linux: IA32_FEATURE_CONTROL and IA32_MCG_CTL
-    if index == MSR_IA32_FEATURE_CONTROL || index == MSR_IA32_MCG_CTL {
+    // Denied MSR not exported by Linux: IA32_MCG_CTL
+    if index == MSR_IA32_MCG_CTL {
         return false;
     };
     ALLOWED_MSR_RANGES.iter().any(|range| range.contains(index))
@@ -312,7 +312,7 @@ pub fn set_msrs(
     vcpu: &VcpuFd,
     msr_entries: &[kvm_msr_entry],
 ) -> std::result::Result<(), SetMSRsError> {
-    let msrs = Msrs::from_entries(&msr_entries).map_err(SetMSRsError::Create)?;
+    let msrs = Msrs::from_entries(msr_entries).map_err(SetMSRsError::Create)?;
     vcpu.set_msrs(&msrs)
         .map_err(SetMSRsError::Set)
         .and_then(|msrs_written| {
@@ -349,7 +349,7 @@ mod tests {
     fn test_msr_allowlist() {
         for range in ALLOWED_MSR_RANGES.iter() {
             for msr in range.base..(range.base + range.nmsrs) {
-                let should = !matches!(msr, MSR_IA32_FEATURE_CONTROL | MSR_IA32_MCG_CTL);
+                let should = !matches!(msr, MSR_IA32_MCG_CTL);
                 assert_eq!(msr_should_serialize(msr), should);
             }
         }

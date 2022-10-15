@@ -229,7 +229,7 @@ pub fn if_index(tap: &Tap) -> i32 {
         .execute(&sock, c_ulong::from(net_gen::sockios::SIOCGIFINDEX))
         .unwrap();
 
-    unsafe { *ifreq.ifr_ifru.ifru_ivalue.as_ref() }
+    unsafe { ifreq.ifr_ifru.ifru_ivalue }
 }
 
 /// Enable the tap interface.
@@ -480,7 +480,7 @@ pub mod test {
             assert!(&self.net().irq_trigger.has_pending_irq(IrqType::Vring));
             self.rxq
                 .check_used_elem(used_idx, 0, expected_frame.len() as u32);
-            self.rxq.dtable[0].check_data(&expected_frame);
+            self.rxq.dtable[0].check_data(expected_frame);
         }
 
         // Generates a frame of `frame_len` and writes it to the provided descriptor chain.
