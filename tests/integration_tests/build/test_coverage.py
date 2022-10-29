@@ -1,12 +1,6 @@
 # Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests pertaining to line/branch test coverage for the Firecracker code base.
-
-# TODO
-
-- Put the coverage in `s3://spec.firecracker` and update it automatically.
-  target should be put in `s3://spec.firecracker` and automatically updated.
-"""
+"""Tests enforcing code coverage for production code."""
 
 
 import os
@@ -29,9 +23,9 @@ from host_tools import proc
 # Checkout the cpuid crate. In the future other
 # differences may appear.
 if utils.is_io_uring_supported():
-    COVERAGE_DICT = {"Intel": 82.99, "AMD": 82.31, "ARM": 82.41}
+    COVERAGE_DICT = {"Intel": 82.99, "AMD": 82.31, "ARM": 82.47}
 else:
-    COVERAGE_DICT = {"Intel": 80.15, "AMD": 79.48, "ARM": 79.59}
+    COVERAGE_DICT = {"Intel": 80.15, "AMD": 79.48, "ARM": 79.68}
 
 PROC_MODEL = proc.proc_type()
 
