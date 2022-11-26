@@ -41,7 +41,7 @@ use std::time::Duration;
 use std::{fmt, io};
 
 use arch::DeviceType;
-use devices::legacy::serial::{IER_RDA_BIT, IER_RDA_OFFSET};
+use devices::legacy::{IER_RDA_BIT, IER_RDA_OFFSET};
 use devices::virtio::balloon::Error as BalloonError;
 use devices::virtio::{
     Balloon, BalloonConfig, BalloonStats, Block, MmioTransport, Net, BALLOON_DEV_ID, TYPE_BALLOON,
@@ -694,7 +694,7 @@ impl Vmm {
     ) -> std::result::Result<(), BalloonError> {
         // The balloon cannot have a target size greater than the size of
         // the guest memory.
-        if amount_mib as u64 > mem_size_mib(self.guest_memory()) {
+        if u64::from(amount_mib) > mem_size_mib(self.guest_memory()) {
             return Err(BalloonError::TooManyPagesRequested);
         }
 

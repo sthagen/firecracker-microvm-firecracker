@@ -12,10 +12,11 @@ use std::sync::{Arc, Mutex};
 use arch::InitrdConfig;
 #[cfg(target_arch = "x86_64")]
 use cpuid::common::is_same_model;
-use devices::legacy::serial::ReadableFd;
 #[cfg(target_arch = "aarch64")]
 use devices::legacy::RTCDevice;
-use devices::legacy::{EventFdTrigger, SerialDevice, SerialEventsWrapper, SerialWrapper};
+use devices::legacy::{
+    EventFdTrigger, ReadableFd, SerialDevice, SerialEventsWrapper, SerialWrapper,
+};
 use devices::virtio::{Balloon, Block, MmioTransport, Net, VirtioDevice, Vsock, VsockUnixBackend};
 use event_manager::{MutEventSubscriber, SubscriberOps};
 use libc::EFD_NONBLOCK;
@@ -1088,6 +1089,25 @@ pub mod tests {
         .unwrap()
     }
 
+    fn cmdline_contains(cmdline: &Cmdline, slug: &str) -> bool {
+        // The following unwraps can never fail; the only way any of these methods
+        // would return an `Err` is if one of the following conditions is met:
+        //    1. The command line is empty: We just added things to it, and if insertion
+        //       of an argument goes wrong, then `Cmdline::insert` would have already
+        //       returned `Err`.
+        //    2. There's a spurious null character somewhere in the command line: The
+        //       `Cmdline::insert` methods verify that this is not the case.
+        //    3. The `CString` is not valid UTF8: It just got created from a `String`,
+        //       which was valid UTF8.
+
+        cmdline
+            .as_cstring()
+            .unwrap()
+            .into_string()
+            .unwrap()
+            .contains(slug)
+    }
+
     pub(crate) fn default_kernel_cmdline() -> Cmdline {
         linux_loader::cmdline::Cmdline::try_from(DEFAULT_KERNEL_CMDLINE, arch::CMDLINE_MAX_SIZE)
             .unwrap()
@@ -1379,12 +1399,7 @@ pub mod tests {
             let mut vmm = default_vmm();
             let mut cmdline = default_kernel_cmdline();
             insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(cmdline
-                .as_cstring()
-                .unwrap()
-                .into_string()
-                .unwrap()
-                .contains("root=/dev/vda ro"));
+            assert!(cmdline_contains(&cmdline, "root=/dev/vda ro"));
             assert!(vmm
                 .mmio_device_manager
                 .get_device(DeviceType::Virtio(TYPE_BLOCK), drive_id.as_str())
@@ -1404,12 +1419,7 @@ pub mod tests {
             let mut vmm = default_vmm();
             let mut cmdline = default_kernel_cmdline();
             insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(cmdline
-                .as_cstring()
-                .unwrap()
-                .into_string()
-                .unwrap()
-                .contains("root=PARTUUID=0eaa91a0-01 rw"));
+            assert!(cmdline_contains(&cmdline, "root=PARTUUID=0eaa91a0-01 rw"));
             assert!(vmm
                 .mmio_device_manager
                 .get_device(DeviceType::Virtio(TYPE_BLOCK), drive_id.as_str())
@@ -1429,18 +1439,8 @@ pub mod tests {
             let mut vmm = default_vmm();
             let mut cmdline = default_kernel_cmdline();
             insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(!cmdline
-                .as_cstring()
-                .unwrap()
-                .into_string()
-                .unwrap()
-                .contains("root=PARTUUID="));
-            assert!(!cmdline
-                .as_cstring()
-                .unwrap()
-                .into_string()
-                .unwrap()
-                .contains("root=/dev/vda"));
+            assert!(!cmdline_contains(&cmdline, "root=PARTUUID="));
+            assert!(!cmdline_contains(&cmdline, "root=/dev/vda"));
             assert!(vmm
                 .mmio_device_manager
                 .get_device(DeviceType::Virtio(TYPE_BLOCK), drive_id.as_str())
@@ -1476,12 +1476,7 @@ pub mod tests {
             let mut cmdline = default_kernel_cmdline();
             insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
 
-            assert!(cmdline
-                .as_cstring()
-                .unwrap()
-                .into_string()
-                .unwrap()
-                .contains("root=PARTUUID=0eaa91a0-01 rw"));
+            assert!(cmdline_contains(&cmdline, "root=PARTUUID=0eaa91a0-01 rw"));
             assert!(vmm
                 .mmio_device_manager
                 .get_device(DeviceType::Virtio(TYPE_BLOCK), "root")
@@ -1497,15 +1492,11 @@ pub mod tests {
 
             // Check if these three block devices are inserted in kernel_cmdline.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            assert!(cmdline
-                .as_cstring()
-                .unwrap()
-                .into_string()
-                .unwrap()
-                .contains(
-                    "virtio_mmio.device=4K@0xd0000000:5 virtio_mmio.device=4K@0xd0001000:6 \
-                     virtio_mmio.device=4K@0xd0002000:7"
-                ));
+            assert!(cmdline_contains(
+                &cmdline,
+                "virtio_mmio.device=4K@0xd0000000:5 virtio_mmio.device=4K@0xd0001000:6 \
+                 virtio_mmio.device=4K@0xd0002000:7"
+            ));
         }
 
         // Use case 5: root block device is rw.
@@ -1521,12 +1512,7 @@ pub mod tests {
             let mut vmm = default_vmm();
             let mut cmdline = default_kernel_cmdline();
             insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(cmdline
-                .as_cstring()
-                .unwrap()
-                .into_string()
-                .unwrap()
-                .contains("root=/dev/vda rw"));
+            assert!(cmdline_contains(&cmdline, "root=/dev/vda rw"));
             assert!(vmm
                 .mmio_device_manager
                 .get_device(DeviceType::Virtio(TYPE_BLOCK), drive_id.as_str())
@@ -1546,12 +1532,7 @@ pub mod tests {
             let mut vmm = default_vmm();
             let mut cmdline = default_kernel_cmdline();
             insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(cmdline
-                .as_cstring()
-                .unwrap()
-                .into_string()
-                .unwrap()
-                .contains("root=PARTUUID=0eaa91a0-01 ro"));
+            assert!(cmdline_contains(&cmdline, "root=PARTUUID=0eaa91a0-01 ro"));
             assert!(vmm
                 .mmio_device_manager
                 .get_device(DeviceType::Virtio(TYPE_BLOCK), drive_id.as_str())
@@ -1571,12 +1552,7 @@ pub mod tests {
             let mut vmm = default_vmm();
             let mut cmdline = default_kernel_cmdline();
             insert_block_devices(&mut vmm, &mut cmdline, &mut event_manager, block_configs);
-            assert!(cmdline
-                .as_cstring()
-                .unwrap()
-                .into_string()
-                .unwrap()
-                .contains("root=/dev/vda rw"));
+            assert!(cmdline_contains(&cmdline, "root=/dev/vda rw"));
             assert!(vmm
                 .mmio_device_manager
                 .get_device(DeviceType::Virtio(TYPE_BLOCK), drive_id.as_str())
@@ -1612,12 +1588,10 @@ pub mod tests {
         insert_balloon_device(&mut vmm, &mut cmdline, &mut event_manager, balloon_config);
         // Check if the vsock device is described in kernel_cmdline.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        assert!(cmdline
-            .as_cstring()
-            .unwrap()
-            .into_string()
-            .unwrap()
-            .contains("virtio_mmio.device=4K@0xd0000000:5"));
+        assert!(cmdline_contains(
+            &cmdline,
+            "virtio_mmio.device=4K@0xd0000000:5"
+        ));
     }
 
     #[test]
@@ -1633,12 +1607,10 @@ pub mod tests {
         insert_vsock_device(&mut vmm, &mut cmdline, &mut event_manager, vsock_config);
         // Check if the vsock device is described in kernel_cmdline.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        assert!(cmdline
-            .as_cstring()
-            .unwrap()
-            .into_string()
-            .unwrap()
-            .contains("virtio_mmio.device=4K@0xd0000000:5"));
+        assert!(cmdline_contains(
+            &cmdline,
+            "virtio_mmio.device=4K@0xd0000000:5"
+        ));
     }
 
     #[test]
