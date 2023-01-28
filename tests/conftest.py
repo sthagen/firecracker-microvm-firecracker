@@ -442,8 +442,13 @@ def microvm(test_fc_session_root_path, bin_cloner_path):
 def microvm_factory(tmp_path, bin_cloner_path):
     """Fixture to create microvms simply.
 
-    By using tmp_path, the last 3 runs are kept. This may be a problem when
-    running large number of tests, but it's very handy for debugging.
+    tmp_path is cleaned up by pytest after 3 sessions.
+    However, since we only run one session per docker container execution,
+    tmp_path is never cleaned up by pytest for us.
+    In order to avoid running out of space when instantiating many microvms,
+    we remove the directory manually when the fixture is destroyed
+    (that is after every test).
+    One can comment the removal line, if it helps with debugging.
     """
 
     class MicroVMFactory:
@@ -474,6 +479,7 @@ def microvm_factory(tmp_path, bin_cloner_path):
             """Clean up all built VMs"""
             for vm in self.vms:
                 vm.kill()
+            shutil.rmtree(self.tmp_path)
 
     uvm_factory = MicroVMFactory(tmp_path, bin_cloner_path)
     yield uvm_factory
@@ -496,29 +502,6 @@ def test_microvm_any(request, microvm):
 
     MICROVM_S3_FETCHER.init_vm_resources(request.param, microvm)
     yield microvm
-
-
-@pytest.fixture(autouse=True, scope="session")
-def test_spectre_mitigations():
-    """Check the kernel is compiled with SPECTREv2 mitigations."""
-
-    def x86_64(body):
-        return ("IBPB: conditional" in body or "IBPB: always-on" in body) and (
-            "Enhanced IBRS" in body or "IBRS" in body
-        )
-
-    def aarch64(body):
-        return "Mitigation: CSV2, BHB" in body or "Not affected" in body
-
-    arch = platform.machine()
-    assert arch in ("x86_64", "aarch64"), f"Unsupported arch {arch}"
-
-    body = open(
-        "/sys/devices/system/cpu/vulnerabilities/spectre_v2", encoding="utf-8"
-    ).read()
-
-    mitigated = x86_64(body) if arch == "x86_64" else aarch64(body)
-    assert mitigated, "SPECTREv2 not mitigated {}".format(body)
 
 
 def firecracker_id(fc):

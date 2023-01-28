@@ -16,7 +16,7 @@ prepare_fc_rootfs() {
     # msr-tools is only supported on x86-64.
     arch=$(uname -m)
     if [ "${arch}" == "x86_64" ]; then
-        packages="$packages msr-tools"    
+        packages="$packages msr-tools"
     fi
 
     apt-get update
