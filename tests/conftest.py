@@ -109,9 +109,9 @@ from framework.utils_cpu_templates import SUPPORTED_CPU_TEMPLATES
 # Tests root directory.
 SCRIPT_FOLDER = os.path.dirname(os.path.realpath(__file__))
 
-# This codebase uses Python features available in Python 3.6 or above
-if sys.version_info < (3, 6):
-    raise SystemError("This codebase requires Python 3.6 or above.")
+# This codebase uses Python features available in Python 3.10 or above
+if sys.version_info < (3, 10):
+    raise SystemError("This codebase requires Python 3.10 or above.")
 
 
 # Some tests create system-level resources; ensure we run as root.
@@ -344,7 +344,7 @@ def change_net_config_space_bin(test_fc_session_root_path):
     _gcc_compile(
         "host_tools/change_net_config_space.c",
         change_net_config_space_bin,
-        extra_flags="",
+        extra_flags="-static",
     )
     yield change_net_config_space_bin
 

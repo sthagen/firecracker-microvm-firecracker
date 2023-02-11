@@ -20,7 +20,6 @@ from framework.artifacts import (
 )
 from framework import utils
 import host_tools.logging as log_tools
-import host_tools.network as net_tools
 
 
 class VmInstance:
@@ -136,18 +135,17 @@ class MicrovmBuilder:
                 netmask_len=iface.netmask,
                 tapname=iface.tap_name,
             )
-            guest_mac = net_tools.mac_from_ip(iface.guest_ip)
             response = vm.network.put(
                 iface_id=iface.dev_name,
                 host_dev_name=iface.tap_name,
-                guest_mac=guest_mac,
+                guest_mac=iface.guest_mac,
             )
             assert vm.api_session.is_status_no_content(response.status_code)
 
         with open(config.local_path(), encoding="utf-8") as microvm_config_file:
             microvm_config = json.load(microvm_config_file)
 
-        response = vm.basic_config(
+        vm.basic_config(
             add_root_device=False, boot_args="console=ttyS0 reboot=k panic=1"
         )
 
