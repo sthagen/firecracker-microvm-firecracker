@@ -4,7 +4,6 @@
 import time
 
 from framework import utils
-import host_tools.network as net_tools  # pylint: disable=import-error
 
 # The iperf version to run this tests with
 IPERF_BINARY = "iperf3"
@@ -166,7 +165,6 @@ def test_rx_rate_limiting_cpu_load(test_microvm_with_api, network_config):
     )
 
     test_microvm.start()
-
     # Start iperf server on guest.
     _start_iperf_on_guest(test_microvm, guest_ip)
 
@@ -423,10 +421,9 @@ def _patch_iface_bw(test_microvm, iface_id, rx_or_tx, new_bucket_size, new_refil
 def _start_iperf_on_guest(test_microvm, hostname):
     """Start iperf in server mode through an SSH connection."""
     test_microvm.ssh_config["hostname"] = hostname
-    ssh_connection = net_tools.SSHConnection(test_microvm.ssh_config)
 
     iperf_cmd = "{} -sD -f KBytes\n".format(IPERF_BINARY)
-    ssh_connection.execute_command(iperf_cmd)
+    test_microvm.ssh.execute_command(iperf_cmd)
 
     # Wait for the iperf daemon to start.
     time.sleep(1)
@@ -435,8 +432,7 @@ def _start_iperf_on_guest(test_microvm, hostname):
 def _run_iperf_on_guest(test_microvm, iperf_cmd, hostname):
     """Run a client related iperf command through an SSH connection."""
     test_microvm.ssh_config["hostname"] = hostname
-    ssh_connection = net_tools.SSHConnection(test_microvm.ssh_config)
-    _, stdout, stderr = ssh_connection.execute_command(iperf_cmd)
+    _, stdout, stderr = test_microvm.ssh.execute_command(iperf_cmd)
     assert stderr.read() == ""
 
     out = stdout.read()

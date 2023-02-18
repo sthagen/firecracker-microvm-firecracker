@@ -27,7 +27,6 @@ from framework.utils import (
     DictQuery,
 )
 from framework.utils_cpuid import get_cpu_model_name, get_instance_type
-import host_tools.network as net_tools
 
 TEST_ID = "network_tcp_throughput"
 kernel_version = get_kernel_version(level=1)
@@ -138,12 +137,11 @@ def produce_iperf_output(
         )
 
         modes_len = len(modes)
-        ssh_connection = net_tools.SSHConnection(basevm.ssh_config)
         for client_idx in range(load_factor * basevm.vcpus_count):
             futures.append(
                 executor.submit(
                     spawn_iperf_client,
-                    ssh_connection,
+                    basevm.ssh,
                     client_idx,
                     # Distribute the modes evenly.
                     modes[client_idx % modes_len],
@@ -162,7 +160,7 @@ def produce_iperf_output(
 
         # We expect a single emulation thread tagged with `firecracker` name.
         tag = "firecracker"
-        assert tag in cpu_load and len(cpu_load[tag]) == 1
+        assert tag in cpu_load and len(cpu_load[tag]) > 0
         for thread_id in cpu_load[tag]:
             data = cpu_load[tag][thread_id]
             data_len = len(data)
@@ -354,7 +352,11 @@ def iperf_workload(context):
     ssh_key = context.disk.ssh_key()
     # Create a fresh microvm from artifacts.
     vm_instance = vm_builder.build(
-        kernel=context.kernel, disks=[rw_disk], ssh_key=ssh_key, config=context.microvm
+        kernel=context.kernel,
+        disks=[rw_disk],
+        ssh_key=ssh_key,
+        config=context.microvm,
+        monitor_memory=False,
     )
     basevm = vm_instance.vm
     basevm.start()

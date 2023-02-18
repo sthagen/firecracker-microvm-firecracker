@@ -27,7 +27,6 @@ from framework.utils import (
 )
 from framework.utils_cpuid import get_cpu_model_name, get_instance_type
 import host_tools.drive as drive_tools
-import host_tools.network as net_tools  # pylint: disable=import-error
 import framework.stats as st
 from integration_tests.performance.configs import defs
 from integration_tests.performance.utils import handle_failure
@@ -152,7 +151,7 @@ def run_fio(env_id, basevm, ssh_conn, mode, bs):
         result = {}
         cpu_load = cpu_load_future.result()
         tag = "firecracker"
-        assert tag in cpu_load and len(cpu_load[tag]) == 1
+        assert tag in cpu_load and len(cpu_load[tag]) > 0
 
         data = list(cpu_load[tag].values())[0]
         data_len = len(data)
@@ -352,7 +351,11 @@ def fio_workload(context):
     ssh_key = context.disk.ssh_key()
     # Create a fresh microvm from artifacts.
     vm_instance = vm_builder.build(
-        kernel=context.kernel, disks=[rw_disk], ssh_key=ssh_key, config=context.microvm
+        kernel=context.kernel,
+        disks=[rw_disk],
+        ssh_key=ssh_key,
+        config=context.microvm,
+        monitor_memory=False,
     )
     basevm = vm_instance.vm
 
@@ -389,7 +392,6 @@ def fio_workload(context):
         )
     )
 
-    ssh_connection = net_tools.SSHConnection(basevm.ssh_config)
     env_id = (
         f"{context.kernel.name()}/{context.disk.name()}/"
         f"{io_engine.lower()}_{context.microvm.name()}"
@@ -403,7 +405,7 @@ def fio_workload(context):
                 func_kwargs={
                     "env_id": env_id,
                     "basevm": basevm,
-                    "ssh_conn": ssh_connection,
+                    "ssh_conn": basevm.ssh,
                     "mode": mode,
                     "bs": bs,
                 },

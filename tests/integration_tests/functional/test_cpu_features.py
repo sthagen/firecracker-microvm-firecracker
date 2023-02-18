@@ -11,6 +11,7 @@ import os
 import shutil
 import re
 import sys
+import time
 import pytest
 import pandas as pd
 
@@ -22,7 +23,6 @@ from framework.builder import MicrovmBuilder
 from framework.defs import SUPPORTED_KERNELS
 from framework.utils_cpu_templates import SUPPORTED_CPU_TEMPLATES
 import framework.utils_cpuid as cpuid_utils
-import host_tools.network as net_tools
 
 PLATFORM = platform.machine()
 
@@ -136,10 +136,8 @@ def test_brand_string(test_microvm_with_api, network_config):
     _tap, _, _ = test_microvm.ssh_network_config(network_config, "1")
     test_microvm.start()
 
-    ssh_connection = net_tools.SSHConnection(test_microvm.ssh_config)
-
     guest_cmd = "cat /proc/cpuinfo | grep 'model name' | head -1"
-    _, stdout, stderr = ssh_connection.execute_command(guest_cmd)
+    _, stdout, stderr = test_microvm.ssh.execute_command(guest_cmd)
     assert stderr.read() == ""
 
     line = stdout.readline().rstrip()
@@ -161,14 +159,15 @@ def test_brand_string(test_microvm_with_api, network_config):
     assert guest_brand_string == expected_guest_brand_string
 
 
-# Some MSR values should not be checked since they can change at Guest runtime.
+# Some MSR values should not be checked since they can change at guest runtime
+# and between different boots.
 # Current exceptions:
-#   * FS and GS change on task switch and arch_prctl.
-#   * TSC is different for each Guest.
-#   * MSR_{C, L}STAR used for SYSCALL/SYSRET; can be different between guests.
-#   * MSR_IA32_SYSENTER_E{SP, IP} used for SYSENTER/SYSEXIT; same as above.
-#   * MSR_KVM_{WALL, SYSTEM}_CLOCK addresses for struct pvclock_* can be different.
-#   * MSR_IA32_TSX_CTRL is not available to read/write via KVM (known limitation).
+# * FS and GS change on task switch and arch_prctl.
+# * TSC is different for each guest.
+# * MSR_{C, L}STAR used for SYSCALL/SYSRET; can be different between guests.
+# * MSR_IA32_SYSENTER_E{SP, IP} used for SYSENTER/SYSEXIT; same as above.
+# * MSR_KVM_{WALL, SYSTEM}_CLOCK addresses for struct pvclock_* can be different.
+# * MSR_IA32_TSX_CTRL is not available to read/write via KVM (known limitation).
 #
 # More detailed information about MSRs can be found in the Intel® 64 and IA-32
 # Architectures Software Developer’s Manual - Volume 4: Model-Specific Registers
@@ -182,7 +181,7 @@ MSR_EXCEPTION_LIST = [
     "0x122",       # MSR_IA32_TSX_CTRL
     "0x175",       # MSR_IA32_SYSENTER_ESP
     "0x176",       # MSR_IA32_SYSENTER_EIP
-    "0x6e0",       # MSR_IA32_TSCDEADLINE
+    "0x6e0",       # MSR_IA32_TSC_DEADLINE
     "0xc0000082",  # MSR_LSTAR
     "0xc0000083",  # MSR_CSTAR
     "0xc0000100",  # MSR_FS_BASE
@@ -240,33 +239,38 @@ def msr_cpu_template_fxt(request):
 @pytest.mark.nonci
 def test_cpu_rdmsr(bin_cloner_path, network_config, msr_cpu_template):
     """
-    Test MSRs that are available to the Guest.
+    Test MSRs that are available to the guest.
 
-    This test boots a Firecracker uVM and tries to read a set of MSRs from the guest.
-    The Guest MSR list is compared against a list of MSRs that are expected when running
-    on a particular host kernel and with a particular Guest CPU template.
-    The list is different for each kernel version because Firecracker relies on
-    MSR emulation provided by KVM. If KVM emulation changes, then the MSR list
-    available to the guest might change also.
-    The list is also dependant on CPUID (CPU templates) since some MSRs are not available
-    if CPUID features are disabled.
-    Lastly, this tests also checks for MSR values against the baseline. This helps validate
-    that defaults have not changed due to emulation implementation changes in the kernel.
+    This test boots a uVM and tries to read a set of MSRs from the guest.
+    The guest MSR list is compared against a list of MSRs that are expected
+    when running on a particular combination of host kernel, guest kernel and
+    CPU template.
 
-    TODO: This only validates T2S templates. Since T2 and C3 did not set the
-    ARCH_CAPABILITIES MSR, the value of that MSR is different between different
-    host CPU types (see Github PR #3066). So we can either:
-        * add an exceptions for different template types when checking values
-        * deprecate T2 and C3 since they are somewhat broken
+    The list is dependent on:
+    * host kernel version, since firecracker relies on MSR emulation provided
+      by KVM
+    * guest kernel version, since some MSRs are writable from guest uVMs and
+      different guest kernels might set different values
+    * CPU template, since enabled CPUIDs are different between CPU templates
+      and some MSRs are not available if CPUID features are disabled
+
+    This comparison helps validate that defaults have not changed due to
+    emulation implementation changes by host kernel patches and CPU templates.
+
+    TODO: This validates T2S, T2CL and T2A templates. Since T2 and C3 did not
+    set the ARCH_CAPABILITIES MSR, the value of that MSR is different between
+    different host CPU types (see Github PR #3066). So we can either:
+    * add an exceptions for different template types when checking values
+    * deprecate T2 and C3 since they are somewhat broken
 
     @type: functional
     """
 
     artifacts = ArtifactCollection(_test_images_s3_bucket())
     # Testing matrix:
-    # - Guest kernel: Linux 4.14 & Linux 5.10
-    # - Rootfs: Ubuntu 18.04 with msr-tools package installed
-    # - Microvm: 1vCPU with 1024 MB RAM
+    # * Guest kernel: Linux 4.14 & Linux 5.10
+    # * Rootfs: Ubuntu 18.04 with msr-tools package installed
+    # * Microvm: 1vCPU with 1024 MB RAM
     microvm_artifacts = ArtifactSet(artifacts.microvms(keyword="1vcpu_1024mb"))
     kernel_artifacts = ArtifactSet(artifacts.kernels())
     disk_artifacts = ArtifactSet(artifacts.disks(keyword="bionic-msrtools"))
@@ -300,11 +304,10 @@ def _test_cpu_rdmsr(context):
     test_microvm = vm_instance.vm
     test_microvm.start()
 
-    ssh_connection = net_tools.SSHConnection(test_microvm.ssh_config)
-    ssh_connection.scp_file(
+    test_microvm.ssh.scp_file(
         "../resources/tests/msr/msr_reader.sh", "/bin/msr_reader.sh"
     )
-    _, stdout, stderr = ssh_connection.execute_command("/bin/msr_reader.sh")
+    _, stdout, stderr = test_microvm.ssh.execute_command("/bin/msr_reader.sh")
     assert stderr.read() == ""
 
     # Load results read from the microvm
@@ -312,10 +315,10 @@ def _test_cpu_rdmsr(context):
 
     # Load baseline
     # Baselines are taken by running `msr_reader.sh` on:
-    #  * host running kernel 4.14 and guest 4.14 with the `bionic-msrtools` rootfs
-    #  * host running kernel 4.14 and guest 5.10 with the `bionic-msrtools` rootfs
-    #  * host running kernel 5.10 and guest 4.14 with the `bionic-msrtools` rootfs
-    #  * host running kernel 5.10 and guest 5.10 with the `bionic-msrtools` rootfs
+    # * host running kernel 4.14 and guest 4.14 with the `bionic-msrtools` rootfs
+    # * host running kernel 4.14 and guest 5.10 with the `bionic-msrtools` rootfs
+    # * host running kernel 5.10 and guest 4.14 with the `bionic-msrtools` rootfs
+    # * host running kernel 5.10 and guest 5.10 with the `bionic-msrtools` rootfs
     host_kv = utils.get_kernel_version(level=1)
     guest_kv = re.search("vmlinux-(.*).bin", context.kernel.name()).group(1)
     baseline_file_name = f"msr_list_{cpu_template}_{host_kv}host_{guest_kv}guest.csv"
@@ -353,7 +356,6 @@ def _test_cpu_rdmsr(context):
 # that spans two instances (one that takes a snapshot and one that restores from it)
 # fmt: off
 SNAPSHOT_RESTORE_SHARED_NAMES = {
-    "cpu_templates":                     [None, "T2S"],
     "snapshot_artifacts_root_dir_wrmsr": "snapshot_artifacts/wrmsr",
     "snapshot_artifacts_root_dir_cpuid": "snapshot_artifacts/cpuid",
     "rootfs_fname":                      "rootfs_rw",
@@ -366,8 +368,8 @@ SNAPSHOT_RESTORE_SHARED_NAMES = {
     "snapshot_fname":                    "vmstate",
     "mem_fname":                         "mem",
     # Testing matrix:
-    # - Rootfs: Ubuntu 18.04 with msr-tools package installed
-    # - Microvm: 1vCPU with 1024 MB RAM
+    # * Rootfs: Ubuntu 18.04 with msr-tools package installed
+    # * Microvm: 1vCPU with 1024 MB RAM
     "disk_keyword":                      "bionic-msrtools",
     "microvm_keyword":                   "1vcpu_1024mb",
 }
@@ -407,17 +409,15 @@ def _test_cpu_wrmsr_snapshot(context):
     vm.start()
 
     # Make MSR modifications
-    ssh_connection = net_tools.SSHConnection(vm.ssh_config)
-
     msr_writer_host_fname = "../resources/tests/msr/msr_writer.sh"
     msr_writer_guest_fname = "/bin/msr_writer.sh"
-    ssh_connection.scp_file(msr_writer_host_fname, msr_writer_guest_fname)
+    vm.ssh.scp_file(msr_writer_host_fname, msr_writer_guest_fname)
 
     wrmsr_input_host_fname = "../resources/tests/msr/wrmsr_list.txt"
     wrmsr_input_guest_fname = "/tmp/wrmsr_input.txt"
-    ssh_connection.scp_file(wrmsr_input_host_fname, wrmsr_input_guest_fname)
+    vm.ssh.scp_file(wrmsr_input_host_fname, wrmsr_input_guest_fname)
 
-    _, _, stderr = ssh_connection.execute_command(
+    _, _, stderr = vm.ssh.execute_command(
         f"{msr_writer_guest_fname} {wrmsr_input_guest_fname}"
     )
     assert stderr.read() == ""
@@ -433,7 +433,12 @@ def _test_cpu_wrmsr_snapshot(context):
 
     msrs_before_fname = Path(snapshot_artifacts_dir) / shared_names["msrs_before_fname"]
 
-    dump_msr_state_to_file(msrs_before_fname, ssh_connection, shared_names)
+    dump_msr_state_to_file(msrs_before_fname, vm.ssh, shared_names)
+    # On T2A, the restore test fails with error "cannot allocate memory" so,
+    # adding delay below as a workaround to unblock the tests for now.
+    # TODO: Debug the issue and remove this delay. Create below issue to track this:
+    # https://github.com/firecracker-microvm/firecracker/issues/3453
+    time.sleep(0.25)
 
     # Take a snapshot
     vm.pause_to_snapshot(
@@ -459,20 +464,12 @@ def _test_cpu_wrmsr_snapshot(context):
 
 
 @pytest.mark.skipif(
-    PLATFORM != "x86_64", reason="CPU features are masked only on x86_64."
-)
-@pytest.mark.skipif(
-    cpuid_utils.get_cpu_vendor() != cpuid_utils.CpuVendor.INTEL,
-    reason="CPU templates are only available on Intel.",
-)
-@pytest.mark.skipif(
     utils.get_kernel_version(level=1) not in SUPPORTED_KERNELS,
     reason=f"Supported kernels are {SUPPORTED_KERNELS}",
 )
-@pytest.mark.parametrize("cpu_template", SNAPSHOT_RESTORE_SHARED_NAMES["cpu_templates"])
 @pytest.mark.timeout(900)
 @pytest.mark.nonci
-def test_cpu_wrmsr_snapshot(bin_cloner_path, cpu_template):
+def test_cpu_wrmsr_snapshot(bin_cloner_path, msr_cpu_template):
     """
     This is the first part of the test verifying
     that MSRs retain their values after restoring from a snapshot.
@@ -504,7 +501,7 @@ def test_cpu_wrmsr_snapshot(bin_cloner_path, cpu_template):
     test_context = TestContext()
     test_context.custom = {
         "builder": MicrovmBuilder(bin_cloner_path),
-        "cpu_template": cpu_template,
+        "cpu_template": msr_cpu_template,
         "shared_names": shared_names,
     }
 
@@ -638,9 +635,7 @@ def _test_cpu_wrmsr_restore(context):
 
     # Dump MSR state to a file for further comparison
     msrs_after_fname = Path(snapshot_artifacts_dir) / shared_names["msrs_after_fname"]
-    ssh_connection = net_tools.SSHConnection(vm.ssh_config)
-
-    dump_msr_state_to_file(msrs_after_fname, ssh_connection, shared_names)
+    dump_msr_state_to_file(msrs_after_fname, vm.ssh, shared_names)
 
     # Compare the two lists of MSR values and assert they are equal
     check_msr_values_are_equal(
@@ -651,20 +646,12 @@ def _test_cpu_wrmsr_restore(context):
 
 
 @pytest.mark.skipif(
-    PLATFORM != "x86_64", reason="CPU features are masked only on x86_64."
-)
-@pytest.mark.skipif(
-    cpuid_utils.get_cpu_vendor() != cpuid_utils.CpuVendor.INTEL,
-    reason="CPU templates are only available on Intel.",
-)
-@pytest.mark.skipif(
     utils.get_kernel_version(level=1) not in SUPPORTED_KERNELS,
     reason=f"Supported kernels are {SUPPORTED_KERNELS}",
 )
-@pytest.mark.parametrize("cpu_template", SNAPSHOT_RESTORE_SHARED_NAMES["cpu_templates"])
 @pytest.mark.timeout(900)
 @pytest.mark.nonci
-def test_cpu_wrmsr_restore(microvm_factory, cpu_template):
+def test_cpu_wrmsr_restore(microvm_factory, msr_cpu_template):
     """
     This is the second part of the test verifying
     that MSRs retain their values after restoring from a snapshot.
@@ -690,7 +677,7 @@ def test_cpu_wrmsr_restore(microvm_factory, cpu_template):
     test_context = TestContext()
     test_context.custom = {
         "microvm_factory": microvm_factory,
-        "cpu_template": cpu_template,
+        "cpu_template": msr_cpu_template,
         "shared_names": shared_names,
     }
 
@@ -730,8 +717,6 @@ def _test_cpu_cpuid_snapshot(context):
     vm = vm_instance.vm
     vm.start()
 
-    ssh_connection = net_tools.SSHConnection(vm.ssh_config)
-
     # Dump CPUID to a file that will be published to S3 for the 2nd part of the test
     cpu_template_dir = cpu_template if cpu_template else "none"
     snapshot_artifacts_dir = (
@@ -745,7 +730,7 @@ def _test_cpu_cpuid_snapshot(context):
         Path(snapshot_artifacts_dir) / shared_names["cpuid_before_fname"]
     )
 
-    dump_cpuid_to_file(cpuid_before_fname, ssh_connection)
+    dump_cpuid_to_file(cpuid_before_fname, vm.ssh)
 
     # Take a snapshot
     vm.pause_to_snapshot(
@@ -771,20 +756,12 @@ def _test_cpu_cpuid_snapshot(context):
 
 
 @pytest.mark.skipif(
-    PLATFORM != "x86_64", reason="CPU features are masked only on x86_64."
-)
-@pytest.mark.skipif(
-    cpuid_utils.get_cpu_vendor() != cpuid_utils.CpuVendor.INTEL,
-    reason="CPU templates are only available on Intel.",
-)
-@pytest.mark.skipif(
     utils.get_kernel_version(level=1) not in SUPPORTED_KERNELS,
     reason=f"Supported kernels are {SUPPORTED_KERNELS}",
 )
-@pytest.mark.parametrize("cpu_template", SNAPSHOT_RESTORE_SHARED_NAMES["cpu_templates"])
 @pytest.mark.timeout(900)
 @pytest.mark.nonci
-def test_cpu_cpuid_snapshot(bin_cloner_path, cpu_template):
+def test_cpu_cpuid_snapshot(bin_cloner_path, msr_cpu_template):
     """
     This is the first part of the test verifying
     that CPUID remains the same after restoring from a snapshot.
@@ -811,7 +788,7 @@ def test_cpu_cpuid_snapshot(bin_cloner_path, cpu_template):
     test_context = TestContext()
     test_context.custom = {
         "builder": MicrovmBuilder(bin_cloner_path),
-        "cpu_template": cpu_template,
+        "cpu_template": msr_cpu_template,
         "shared_names": shared_names,
     }
 
@@ -902,9 +879,7 @@ def _test_cpu_cpuid_restore(context):
 
     # Dump CPUID to a file for further comparison
     cpuid_after_fname = Path(snapshot_artifacts_dir) / shared_names["cpuid_after_fname"]
-    ssh_connection = net_tools.SSHConnection(vm.ssh_config)
-
-    dump_cpuid_to_file(cpuid_after_fname, ssh_connection)
+    dump_cpuid_to_file(cpuid_after_fname, vm.ssh)
 
     # Compare the two lists of MSR values and assert they are equal
     check_cpuid_is_equal(
@@ -915,20 +890,12 @@ def _test_cpu_cpuid_restore(context):
 
 
 @pytest.mark.skipif(
-    PLATFORM != "x86_64", reason="CPU features are masked only on x86_64."
-)
-@pytest.mark.skipif(
-    cpuid_utils.get_cpu_vendor() != cpuid_utils.CpuVendor.INTEL,
-    reason="CPU templates are only available on Intel.",
-)
-@pytest.mark.skipif(
     utils.get_kernel_version(level=1) not in SUPPORTED_KERNELS,
     reason=f"Supported kernels are {SUPPORTED_KERNELS}",
 )
-@pytest.mark.parametrize("cpu_template", SNAPSHOT_RESTORE_SHARED_NAMES["cpu_templates"])
 @pytest.mark.timeout(900)
 @pytest.mark.nonci
-def test_cpu_cpuid_restore(microvm_factory, cpu_template):
+def test_cpu_cpuid_restore(microvm_factory, msr_cpu_template):
     """
     This is the second part of the test verifying
     that CPUID remains the same after restoring from a snapshot.
@@ -952,7 +919,7 @@ def test_cpu_cpuid_restore(microvm_factory, cpu_template):
     test_context = TestContext()
     test_context.custom = {
         "microvm_factory": microvm_factory,
-        "cpu_template": cpu_template,
+        "cpu_template": msr_cpu_template,
         "shared_names": shared_names,
     }
 
@@ -1074,9 +1041,8 @@ def check_masked_features(test_microvm, cpu_template):
 
     # Check that all common features discoverable with lscpu
     # are properly masked.
-    ssh_connection = net_tools.SSHConnection(test_microvm.ssh_config)
     guest_cmd = "cat /proc/cpuinfo | grep 'flags' | head -1"
-    _, stdout, stderr = ssh_connection.execute_command(guest_cmd)
+    _, stdout, stderr = test_microvm.ssh.execute_command(guest_cmd)
     assert stderr.read() == ""
 
     cpu_flags_output = stdout.readline().rstrip().split(" ")
