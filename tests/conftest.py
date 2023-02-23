@@ -82,7 +82,6 @@ be run on every microvm image in the bucket, each as a separate test case.
 """
 
 import inspect
-import json
 import os
 import platform
 import re
@@ -99,6 +98,7 @@ from host_tools.metrics import get_metrics_logger
 from framework import utils
 from framework import defs
 from framework.artifacts import ArtifactCollection, FirecrackerArtifact
+from framework.defs import _test_images_s3_bucket
 from framework.microvm import Microvm
 from framework.properties import global_props
 from framework.s3fetcher import MicrovmImageS3Fetcher
@@ -119,52 +119,9 @@ if os.geteuid() != 0:
     raise PermissionError("Test session needs to be run as root.")
 
 
-def _test_images_s3_bucket():
-    """Auxiliary function for getting this session's bucket name."""
-    return os.environ.get(
-        defs.ENV_TEST_IMAGES_S3_BUCKET, defs.DEFAULT_TEST_IMAGES_S3_BUCKET
-    )
-
-
 ARTIFACTS_COLLECTION = ArtifactCollection(_test_images_s3_bucket())
 MICROVM_S3_FETCHER = MicrovmImageS3Fetcher(_test_images_s3_bucket())
 METRICS = get_metrics_logger()
-
-
-# pylint: disable=too-few-public-methods
-class ResultsDumperInterface:
-    """Interface for dumping results to file."""
-
-    def dump(self, result):
-        """Dump the results in JSON format."""
-
-
-# pylint: disable=too-few-public-methods
-class NopResultsDumper(ResultsDumperInterface):
-    """Interface for dummy dumping results to file."""
-
-    def dump(self, result):
-        """Do not do anything."""
-
-
-# pylint: disable=too-few-public-methods
-class JsonFileDumper(ResultsDumperInterface):
-    """Class responsible with outputting test results to files."""
-
-    def __init__(self, test_name):
-        """Initialize the instance."""
-        self._root_path = defs.TEST_RESULTS_DIR
-        # Create the root directory, if it doesn't exist.
-        self._root_path.mkdir(exist_ok=True)
-        kv = utils.get_kernel_version(level=1)
-        self._results_file = self._root_path / f"{test_name}_results_{kv}.json"
-
-    def dump(self, result):
-        """Dump the results in JSON format."""
-        with self._results_file.open("a", encoding="utf-8") as file_fd:
-            json.dump(result, file_fd)
-            file_fd.write("\n")  # Add newline cause Py JSON does not
-            file_fd.flush()
 
 
 def pytest_configure(config):
@@ -249,7 +206,7 @@ def pytest_runtest_logreport(report):
         )
         METRICS.put_metric(
             "failed",
-            1 if report.outcome == "FAILED" else 0,
+            1 if report.outcome == "failed" else 0,
             unit="Count",
         )
         METRICS.flush()
@@ -268,12 +225,21 @@ def metrics(request):
     Ref: https://github.com/awslabs/aws-embedded-metrics-python
     """
     metrics_logger = get_metrics_logger()
-    yield metrics_logger
-    # we set the properties /after/ the test has finished to make sure we
-    # capture any properties set by later fixtures
     for prop_name, prop_val in request.node.user_properties:
         metrics_logger.set_property(prop_name, prop_val)
+    yield metrics_logger
     metrics_logger.flush()
+
+
+@pytest.fixture
+def record_property(record_property, metrics):
+    """Override pytest's record_property to also set a property in our metrics context."""
+
+    def sub(key, value):
+        record_property(key, value)
+        metrics.set_property(key, value)
+
+    return sub
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -289,14 +255,6 @@ def test_fc_session_root_path():
     )
     yield fc_session_root_path
     shutil.rmtree(fc_session_root_path)
-
-
-@pytest.fixture
-def results_file_dumper(request):
-    """Yield the custom --dump-results-to-file test flag."""
-    if request.config.getoption("--dump-results-to-file"):
-        return JsonFileDumper(request.node.originalname)
-    return NopResultsDumper()
 
 
 @with_filelock
@@ -434,13 +392,20 @@ def microvm(test_fc_session_root_path, bin_cloner_path):
     shutil.rmtree(os.path.join(test_fc_session_root_path, vm.id))
 
 
+@pytest.fixture
+def fc_tmp_path(test_fc_session_root_path):
+    """A tmp_path substitute
+
+    We should use pytest's tmp_path fixture instead of this, but this can create
+    very long paths, which can run into the UDS 108 character limit.
+    """
+    return Path(tempfile.mkdtemp(dir=test_fc_session_root_path))
+
+
 @pytest.fixture()
-def microvm_factory(tmp_path, bin_cloner_path):
+def microvm_factory(fc_tmp_path, bin_cloner_path):
     """Fixture to create microvms simply.
 
-    tmp_path is cleaned up by pytest after 3 sessions.
-    However, since we only run one session per docker container execution,
-    tmp_path is never cleaned up by pytest for us.
     In order to avoid running out of space when instantiating many microvms,
     we remove the directory manually when the fixture is destroyed
     (that is after every test).
@@ -451,15 +416,16 @@ def microvm_factory(tmp_path, bin_cloner_path):
         """MicroVM factory"""
 
         def __init__(self, tmp_path, bin_cloner):
-            self.tmp_path = tmp_path
+            self.tmp_path = Path(tmp_path)
             self.bin_cloner_path = bin_cloner
             self.vms = []
 
-        def build(self, kernel=None, rootfs=None):
-            """Build a fresh microvm."""
+        def build(self, kernel=None, rootfs=None, **kwargs):
+            """Build a microvm"""
             vm = Microvm(
                 resource_path=self.tmp_path,
                 bin_cloner_path=self.bin_cloner_path,
+                **kwargs,
             )
             self.vms.append(vm)
             if kernel is not None:
@@ -480,7 +446,7 @@ def microvm_factory(tmp_path, bin_cloner_path):
                 vm.kill()
             shutil.rmtree(self.tmp_path)
 
-    uvm_factory = MicroVMFactory(tmp_path, bin_cloner_path)
+    uvm_factory = MicroVMFactory(fc_tmp_path, bin_cloner_path)
     yield uvm_factory
     uvm_factory.kill()
 

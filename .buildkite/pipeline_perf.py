@@ -9,45 +9,46 @@ import json
 
 from common import group, DEFAULT_INSTANCES, DEFAULT_KERNELS
 
+common = {
+    # retry if the step failed
+    "retry": {"automatic": {"exit_status": 1, "limit": 3}}
+}
+
 perf_test = {
-    "block": [
-        {
-            "label": "🖴 Block Performance - Sync",
-            "test_path": "integration_tests/performance/test_block_performance.py::test_block_performance_sync",
-            "devtool_opts": "-r 16834m -c 1-10 -m 0",
-            "timeout_in_minutes": 120,
-        },
-        {
-            "label": "🖴 Block Performance - Async",
-            "test_path": "integration_tests/performance/test_block_performance.py::test_block_performance_async",
-            "devtool_opts": "-r 16834m -c 1-10 -m 0",
-            "kernels": ["linux_5.10"],
-            "timeout_in_minutes": 120,
-        },
-    ],
+    "block": {
+        "label": "🖴 Block Performance",
+        "test_path": "integration_tests/performance/test_block_performance.py",
+        "devtool_opts": "-r 16834m -c 1-10 -m 0",
+        "timeout_in_minutes": 240,
+        **common,
+    },
     "snapshot-latency": {
         "label": "📸 Snapshot Latency",
         "test_path": "integration_tests/performance/test_snapshot_restore_performance.py",
         "devtool_opts": "-c 1-12 -m 0",
         "timeout_in_minutes": 45,
+        **common,
     },
     "vsock-throughput": {
         "label": "🧦 Vsock Throughput",
         "test_path": "integration_tests/performance/test_vsock_throughput.py",
         "devtool_opts": "-c 1-10 -m 0",
         "timeout_in_minutes": 20,
+        **common,
     },
     "network-latency": {
         "label": "🖧 Network Latency",
         "test_path": "integration_tests/performance/test_network_latency.py",
         "devtool_opts": "-c 1-10 -m 0",
         "timeout_in_minutes": 10,
+        **common,
     },
     "network-throughput": {
         "label": "🖧 Network TCP Throughput",
         "test_path": "integration_tests/performance/test_network_tcp_throughput.py",
         "devtool_opts": "-c 1-10 -m 0",
         "timeout_in_minutes": 45,
+        **common,
     },
 }
 
@@ -64,35 +65,48 @@ def build_group(test):
         instances=test.pop("instances"),
         kernels=test.pop("kernels"),
         # and the rest can be command arguments
-        **test
+        **test,
     )
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "--test",
-    required=True,
-    choices=list(perf_test.keys()),
-    help="performance test"
+    "--test", required=True, choices=list(perf_test.keys()), help="performance test"
 )
 parser.add_argument(
-    "--add-instance",
+    "--instances",
     required=False,
     action="append",
-    default=DEFAULT_INSTANCES,
+    default=[],
+)
+parser.add_argument(
+    "--kernels",
+    required=False,
+    action="append",
+    default=[],
+)
+parser.add_argument(
+    "--extra",
+    required=False,
+    action="append",
+    default=[],
 )
 args = parser.parse_args()
-if not args.add_instance:
-    args.add_instance = DEFAULT_INSTANCES
+if not args.instances:
+    args.instances = DEFAULT_INSTANCES
+if not args.kernels:
+    args.kernels = DEFAULT_KERNELS
+if args.extra:
+    args.extra = dict(val.split("=", maxsplit=1) for val in args.extra)
 group_steps = []
 tests = perf_test[args.test]
 if isinstance(tests, dict):
     tests = [tests]
 for test_data in tests:
-    test_data.setdefault("kernels", DEFAULT_KERNELS)
-    test_data.setdefault("instances", args.add_instance)
+    test_data.setdefault("kernels", args.kernels)
+    test_data.setdefault("instances", args.instances)
+    test_data.update(args.extra)
     group_steps.append(build_group(test_data))
-
 
 pipeline = {
     "env": {
@@ -100,6 +114,6 @@ pipeline = {
         "AWS_EMF_NAMESPACE": "PerfTests",
     },
     "agents": {"queue": "public-prod-us-east-1"},
-    "steps": group_steps
+    "steps": group_steps,
 }
 print(json.dumps(pipeline, indent=4, sort_keys=True, ensure_ascii=False))

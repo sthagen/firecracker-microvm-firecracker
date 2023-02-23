@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from conftest import _test_images_s3_bucket
 from framework.artifacts import ArtifactCollection, ArtifactSet
 from framework.builder import MicrovmBuilder, SnapshotBuilder, SnapshotType
+from framework.defs import _test_images_s3_bucket
 from framework.matrix import TestMatrix, TestContext
 from framework.utils import (
     wait_process_termination,
@@ -42,6 +42,7 @@ def _get_guest_drive_size(ssh_connection, guest_dev_name="/dev/vdb"):
 
 
 ARTIFACTS = ArtifactCollection(_test_images_s3_bucket())
+
 
 # Testing matrix:
 # - Guest kernel: All supported ones

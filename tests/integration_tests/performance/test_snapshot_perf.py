@@ -8,9 +8,8 @@ import os
 import platform
 import pytest
 
-from conftest import _test_images_s3_bucket
 from framework.artifacts import ArtifactCollection, ArtifactSet
-from framework.defs import DEFAULT_TEST_IMAGES_S3_BUCKET
+from framework.defs import _test_images_s3_bucket
 from framework.matrix import TestMatrix, TestContext
 from framework.builder import MicrovmBuilder, SnapshotBuilder, SnapshotType
 from framework.utils import (
@@ -142,7 +141,25 @@ LOAD_LATENCY_BASELINES = {
                     "2vcpu_512mb.json": {"target": 330},
                 },
             },
-        }
+        },
+        "c7g.metal": {
+            "4.14": {
+                "sync": {
+                    "2vcpu_256mb.json": {"target": 2},
+                    "2vcpu_512mb.json": {"target": 2},
+                }
+            },
+            "5.10": {
+                "sync": {
+                    "2vcpu_256mb.json": {"target": 2},
+                    "2vcpu_512mb.json": {"target": 2},
+                },
+                "async": {
+                    "2vcpu_256mb.json": {"target": 320},
+                    "2vcpu_512mb.json": {"target": 360},
+                },
+            },
+        },
     },
 }
 
@@ -246,11 +263,6 @@ def _test_snapshot_create_latency(context):
     # Get ssh key from read-only artifact.
     ssh_key = context.disk.ssh_key()
 
-    logger.info(
-        "Fetching firecracker/jailer versions from {}.".format(
-            DEFAULT_TEST_IMAGES_S3_BUCKET
-        )
-    )
     artifacts = ArtifactCollection(_test_images_s3_bucket())
     firecracker_versions = artifacts.firecracker_versions(
         # v1.0.0 breaks snapshot compatibility with older versions.

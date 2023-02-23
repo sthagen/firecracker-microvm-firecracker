@@ -56,6 +56,7 @@ from framework.resources import (
 LOG = logging.getLogger("microvm")
 data_lock = Lock()
 
+
 # pylint: disable=R0904
 class Microvm:
     """Class to represent a Firecracker microvm.
@@ -560,6 +561,7 @@ class Microvm:
         assert self._api_session.is_status_no_content(
             response.status_code
         ), response.text
+        self.vcpus_count = vcpu_count
 
         if self.memory_monitor:
             self.memory_monitor.guest_mem_mib = mem_size_mib

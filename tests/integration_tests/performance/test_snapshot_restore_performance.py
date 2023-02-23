@@ -9,13 +9,13 @@ import tempfile
 
 import pytest
 
-from conftest import _test_images_s3_bucket
 from framework.artifacts import (
     ArtifactCollection,
     ArtifactSet,
     create_net_devices_configuration,
 )
 from framework.builder import MicrovmBuilder, SnapshotBuilder, SnapshotType
+from framework.defs import _test_images_s3_bucket
 from framework.matrix import TestContext, TestMatrix
 from framework.stats import core
 from framework.stats.baseline import Provider as BaselineProvider
@@ -143,7 +143,7 @@ def get_snap_restore_latency(
 
     extra_disk_paths = []
     if blocks > 1:
-        for (name, diskfile) in scratch_drives[: (blocks - 1)]:
+        for name, diskfile in scratch_drives[: (blocks - 1)]:
             basevm.add_drive(name, diskfile.path, use_ramdisk=True, io_engine="Sync")
             extra_disk_paths.append(diskfile.path)
         assert len(extra_disk_paths) > 0
@@ -359,7 +359,7 @@ def snapshot_workload(context):
     file_dumper = context.custom["results_file_dumper"]
 
     st_core = core.Core(
-        name=TEST_ID, iterations=1, custom={"cpu_model_name": get_cpu_model_name()}
+        name=TEST_ID, iterations=1, custom={"cpu_model": get_cpu_model_name()}
     )
 
     snapshot_scaling_vcpus(context, st_core, vcpu_count=10)
