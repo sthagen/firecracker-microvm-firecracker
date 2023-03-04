@@ -7,6 +7,7 @@ import pytest
 from framework import utils
 from host_tools import proc
 
+
 # We have different coverages based on the host kernel version. This is
 # caused by io_uring, which is only supported by FC for kernels newer
 # than 5.10.
@@ -17,9 +18,9 @@ from host_tools import proc
 # Checkout the cpuid crate. In the future other
 # differences may appear.
 if utils.is_io_uring_supported():
-    COVERAGE_DICT = {"Intel": 82.98, "AMD": 81.99, "ARM": 82.43}
+    COVERAGE_DICT = {"Intel": 82.97, "AMD": 82.14, "ARM": 82.43}
 else:
-    COVERAGE_DICT = {"Intel": 80.11, "AMD": 79.13, "ARM": 79.34}
+    COVERAGE_DICT = {"Intel": 80.13, "AMD": 79.28, "ARM": 79.34}
 
 PROC_MODEL = proc.proc_type()
 

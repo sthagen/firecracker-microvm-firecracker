@@ -58,6 +58,37 @@ def _check_cpu_features_arm(test_microvm):
     )
 
 
+def get_cpu_template_dir(cpu_template):
+    """
+    Utility function to return a valid string which will be used as
+    name of the directory where snapshot artifacts are stored during
+    snapshot test and loaded from during restore test.
+
+    """
+    return cpu_template if cpu_template else "none"
+
+
+def skip_test_based_on_artifacts(snapshot_artifacts_dir):
+    """
+    It is possible that some X template is not supported on
+    the instance where the snapshots were created and,
+    snapshot is loaded on an instance where X is supported. This
+    results in error since restore doesn't find the file to load.
+    e.g. let's suppose snapshot is created on Skylake and restored
+    on Cascade Lake. So, the created artifacts could just be:
+    snapshot_artifacts/wrmsr/vmlinux-4.14/T2S
+    but the restore test would fail because the files in
+    snapshot_artifacts/wrmsr/vmlinux-4.14/T2CL won't be available.
+    To avoid this we make an assumption that if template directory
+    does not exist then snapshot was not created for that template
+    and we skip the test.
+    """
+    if not Path.exists(snapshot_artifacts_dir):
+        reason = f"\n Since {snapshot_artifacts_dir} does not exist \
+                we skip the test assuming that snapshot was not"
+        pytest.skip(re.sub(" +", " ", reason))
+
+
 @pytest.mark.skipif(PLATFORM != "x86_64", reason="CPUID is only supported on x86_64.")
 @pytest.mark.parametrize(
     "num_vcpus",
@@ -196,30 +227,7 @@ MSR_EXCEPTION_LIST = [
 # fmt: on
 
 
-def get_msr_supported_templates():
-    """
-    Return the list of CPU templates supported for MSR-related tests.
-    """
-    # CPU templates supported for the MSR tests
-    msr_supported_templates = ["T2A", "T2S"]
-
-    # CPU templates which need additional checks are added below:
-
-    # Cascade Lake on m5d.metal has MSR 0x122 state as implemented whereas,
-    # Skylake on m5d.metal has MSR 0x122 state as unimplemented.
-    # Since the conflict is seen only with Skylake and Cascade lake,
-    # we add T2CL (Cascade Lake) template only when CPU is not Skylake.
-    t2cl_exception_list = [
-        # Note: we may need to update this list if there are
-        # more conflicting CPU models reported in the future.
-        "Intel(R) Xeon(R) Platinum 8175M CPU @ 2.50GHz",  # Skylake
-    ]
-    if cpuid_utils.get_cpu_model_name() not in t2cl_exception_list:
-        msr_supported_templates.append("T2CL")
-    return msr_supported_templates
-
-
-MSR_SUPPORTED_TEMPLATES = get_msr_supported_templates()
+MSR_SUPPORTED_TEMPLATES = ["T2A", "T2CL", "T2S"]
 
 
 @pytest.fixture(
@@ -426,7 +434,7 @@ def _test_cpu_wrmsr_snapshot(context):
     snapshot_artifacts_dir = (
         Path(shared_names["snapshot_artifacts_root_dir_wrmsr"])
         / context.kernel.base_name()
-        / (cpu_template if cpu_template else "none")
+        / get_cpu_template_dir(cpu_template)
     )
     shutil.rmtree(snapshot_artifacts_dir, ignore_errors=True)
     os.makedirs(snapshot_artifacts_dir)
@@ -573,6 +581,15 @@ def _test_cpu_wrmsr_restore(context):
     microvm_factory = context.custom["microvm_factory"]
     cpu_template = context.custom["cpu_template"]
 
+    cpu_template_dir = get_cpu_template_dir(cpu_template)
+    snapshot_artifacts_dir = (
+        Path(shared_names["snapshot_artifacts_root_dir_wrmsr"])
+        / context.kernel.base_name()
+        / cpu_template_dir
+    )
+
+    skip_test_based_on_artifacts(snapshot_artifacts_dir)
+
     vm = microvm_factory.build()
     vm.spawn()
 
@@ -589,13 +606,6 @@ def _test_cpu_wrmsr_restore(context):
     ssh_arti.download(vm.path)
     vm.ssh_config["ssh_key_path"] = ssh_arti.local_path()
     os.chmod(vm.ssh_config["ssh_key_path"], 0o400)
-
-    cpu_template_dir = cpu_template if cpu_template else "none"
-    snapshot_artifacts_dir = (
-        Path(shared_names["snapshot_artifacts_root_dir_wrmsr"])
-        / context.kernel.base_name()
-        / cpu_template_dir
-    )
 
     # Bring snapshot files from the 1st part of the test into the jail
     chroot_dir = vm.chroot()
@@ -718,7 +728,7 @@ def _test_cpu_cpuid_snapshot(context):
     vm.start()
 
     # Dump CPUID to a file that will be published to S3 for the 2nd part of the test
-    cpu_template_dir = cpu_template if cpu_template else "none"
+    cpu_template_dir = get_cpu_template_dir(cpu_template)
     snapshot_artifacts_dir = (
         Path(shared_names["snapshot_artifacts_root_dir_cpuid"])
         / context.kernel.base_name()
@@ -818,6 +828,15 @@ def _test_cpu_cpuid_restore(context):
     microvm_factory = context.custom["microvm_factory"]
     cpu_template = context.custom["cpu_template"]
 
+    cpu_template_dir = get_cpu_template_dir(cpu_template)
+    snapshot_artifacts_dir = (
+        Path(shared_names["snapshot_artifacts_root_dir_cpuid"])
+        / context.kernel.base_name()
+        / cpu_template_dir
+    )
+
+    skip_test_based_on_artifacts(snapshot_artifacts_dir)
+
     vm = microvm_factory.build()
     vm.spawn()
 
@@ -834,13 +853,6 @@ def _test_cpu_cpuid_restore(context):
     ssh_arti.download(vm.path)
     vm.ssh_config["ssh_key_path"] = ssh_arti.local_path()
     os.chmod(vm.ssh_config["ssh_key_path"], 0o400)
-
-    cpu_template_dir = cpu_template if cpu_template else "none"
-    snapshot_artifacts_dir = (
-        Path(shared_names["snapshot_artifacts_root_dir_cpuid"])
-        / context.kernel.base_name()
-        / cpu_template_dir
-    )
 
     # Bring snapshot files from the 1st part of the test into the jail
     chroot_dir = vm.chroot()

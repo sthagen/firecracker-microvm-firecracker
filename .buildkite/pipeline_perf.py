@@ -6,8 +6,8 @@
 
 import argparse
 
-from common import DEFAULT_INSTANCES, DEFAULT_KERNELS, group, pipeline_to_json
-
+from common import (DEFAULT_INSTANCES, DEFAULT_PLATFORMS, group,
+                    pipeline_to_json)
 
 perf_test = {
     "block": {
@@ -53,7 +53,7 @@ def build_group(test):
         agent_tags=["ag=1"],
         artifacts=["./test_results/*"],
         instances=test.pop("instances"),
-        kernels=test.pop("kernels"),
+        platforms=test.pop("platforms"),
         # and the rest can be command arguments
         **test,
     )
@@ -74,9 +74,10 @@ parser.add_argument(
     default=[],
 )
 parser.add_argument(
-    "--kernels",
+    "--platforms",
     required=False,
     action="append",
+    nargs=2,
     default=[],
 )
 parser.add_argument("--retries", type=int, default=0)
@@ -89,19 +90,21 @@ parser.add_argument(
 args = parser.parse_args()
 if not args.instances:
     args.instances = DEFAULT_INSTANCES
-if not args.kernels:
-    args.kernels = DEFAULT_KERNELS
+if not args.platforms:
+    args.platforms = DEFAULT_PLATFORMS
 if args.extra:
     args.extra = dict(val.split("=", maxsplit=1) for val in args.extra)
 group_steps = []
 tests = [perf_test[test] for test in args.test]
 for test_data in tests:
-    test_data.setdefault("kernels", args.kernels)
+    test_data.setdefault("platforms", args.platforms)
     test_data.setdefault("instances", args.instances)
     test_data.update(args.extra)
     if args.retries > 0:
         # retry if the step fails
-        test_data.setdefault("retry", {"automatic": {"exit_status": 1, "limit": args.retries}})
+        test_data.setdefault(
+            "retry", {"automatic": {"exit_status": 1, "limit": args.retries}}
+        )
     group_steps.append(build_group(test_data))
 
 pipeline = {
@@ -109,7 +112,6 @@ pipeline = {
         "AWS_EMF_SERVICE_NAME": "PerfTests",
         "AWS_EMF_NAMESPACE": "PerfTests",
     },
-    "agents": {"queue": "public-prod-us-east-1"},
     "steps": group_steps,
 }
 print(pipeline_to_json(pipeline))
