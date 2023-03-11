@@ -3,13 +3,13 @@
 
 use kvm_bindings::{kvm_cpuid_entry2, CpuId};
 
-use crate::bit_helper::BitHelper;
-use crate::cpu_leaf::*;
-use crate::template::intel::validate_vendor_id;
-use crate::transformer::*;
+use crate::cpuid::bit_helper::BitHelper;
+use crate::cpuid::cpu_leaf::*;
+use crate::cpuid::template::intel::validate_vendor_id;
+use crate::cpuid::transformer::*;
 
 fn update_feature_info_entry(entry: &mut kvm_cpuid_entry2, _vm_spec: &VmSpec) -> Result<(), Error> {
-    use crate::cpu_leaf::leaf_0x1::*;
+    use crate::cpuid::cpu_leaf::leaf_0x1::*;
 
     entry
         .eax
@@ -39,8 +39,7 @@ fn update_feature_info_entry(entry: &mut kvm_cpuid_entry2, _vm_spec: &VmSpec) ->
         .write_bit(ecx::FMA_BITINDEX, false)
         .write_bit(ecx::XTPR_UPDATE_BITINDEX, false)
         .write_bit(ecx::PDCM_BITINDEX, false)
-        .write_bit(ecx::MOVBE_BITINDEX, false)
-        .write_bit(ecx::OSXSAVE_BITINDEX, false);
+        .write_bit(ecx::MOVBE_BITINDEX, false);
 
     entry
         .edx
@@ -60,7 +59,7 @@ fn update_structured_extended_entry(
     entry: &mut kvm_cpuid_entry2,
     _vm_spec: &VmSpec,
 ) -> Result<(), Error> {
-    use crate::cpu_leaf::leaf_0x7::index0::*;
+    use crate::cpuid::cpu_leaf::leaf_0x7::index0::*;
 
     if entry.index == 0 {
         entry
@@ -74,8 +73,8 @@ fn update_structured_extended_entry(
             .write_bit(ebx::INVPCID_BITINDEX, false)
             .write_bit(ebx::RTM_BITINDEX, false)
             .write_bit(ebx::RDT_M_BITINDEX, false)
-            .write_bit(ebx::RDT_A_BITINDEX, false)
             .write_bit(ebx::MPX_BITINDEX, false)
+            .write_bit(ebx::RDT_A_BITINDEX, false)
             .write_bit(ebx::AVX512F_BITINDEX, false)
             .write_bit(ebx::AVX512DQ_BITINDEX, false)
             .write_bit(ebx::RDSEED_BITINDEX, false)
@@ -116,7 +115,7 @@ fn update_xsave_features_entry(
     entry: &mut kvm_cpuid_entry2,
     _vm_spec: &VmSpec,
 ) -> Result<(), Error> {
-    use crate::cpu_leaf::leaf_0xd::*;
+    use crate::cpuid::cpu_leaf::leaf_0xd::*;
 
     if entry.index == 0 {
         // MPX is masked out with the current template so the size in bytes of the save
@@ -151,7 +150,7 @@ fn update_extended_feature_info_entry(
     entry: &mut kvm_cpuid_entry2,
     _vm_spec: &VmSpec,
 ) -> Result<(), Error> {
-    use crate::cpu_leaf::leaf_0x80000001::*;
+    use crate::cpuid::cpu_leaf::leaf_0x80000001::*;
 
     entry
         .ecx

@@ -3,16 +3,16 @@
 
 use kvm_bindings::{kvm_cpuid_entry2, CpuId};
 
-use crate::bit_helper::BitHelper;
-use crate::cpu_leaf::*;
-use crate::template::intel::validate_vendor_id;
-use crate::transformer::*;
+use crate::cpuid::bit_helper::BitHelper;
+use crate::cpuid::cpu_leaf::*;
+use crate::cpuid::template::intel::validate_vendor_id;
+use crate::cpuid::transformer::*;
 
 pub(crate) fn update_feature_info_entry(
     entry: &mut kvm_cpuid_entry2,
     _vm_spec: &VmSpec,
 ) -> Result<(), Error> {
-    use crate::cpu_leaf::leaf_0x1::*;
+    use crate::cpuid::cpu_leaf::leaf_0x1::*;
 
     entry
         .eax
@@ -43,15 +43,13 @@ pub(crate) fn update_feature_info_entry(
         .write_bit(ecx::SDBG_BITINDEX, false)
         .write_bit(ecx::XTPR_UPDATE_BITINDEX, false)
         .write_bit(ecx::PDCM_BITINDEX, false)
-        .write_bit(ecx::DCA_BITINDEX, false)
-        .write_bit(ecx::OSXSAVE_BITINDEX, false);
+        .write_bit(ecx::DCA_BITINDEX, false);
 
     entry
         .edx
         .write_bit(edx::MCE_BITINDEX, true)
         .write_bit(edx::MTRR_BITINDEX, true)
         .write_bit(edx::PSN_BITINDEX, false)
-        .write_bit(edx::SSE42_BITINDEX, false)
         .write_bit(edx::DS_BITINDEX, false)
         .write_bit(edx::ACPI_BITINDEX, false)
         .write_bit(edx::SS_BITINDEX, false)
@@ -66,7 +64,7 @@ pub(crate) fn update_structured_extended_entry(
     entry: &mut kvm_cpuid_entry2,
     _vm_spec: &VmSpec,
 ) -> Result<(), Error> {
-    use crate::cpu_leaf::leaf_0x7::index0::*;
+    use crate::cpuid::cpu_leaf::leaf_0x7::index0::*;
 
     if entry.index == 0 {
         entry
@@ -78,8 +76,8 @@ pub(crate) fn update_structured_extended_entry(
             .write_bit(ebx::RTM_BITINDEX, false)
             .write_bit(ebx::RDT_M_BITINDEX, false)
             .write_bit(ebx::FPU_CS_DS_DEPRECATE_BITINDEX, false)
-            .write_bit(ebx::RDT_A_BITINDEX, false)
             .write_bit(ebx::MPX_BITINDEX, false)
+            .write_bit(ebx::RDT_A_BITINDEX, false)
             .write_bit(ebx::AVX512F_BITINDEX, false)
             .write_bit(ebx::AVX512DQ_BITINDEX, false)
             .write_bit(ebx::RDSEED_BITINDEX, false)
@@ -128,7 +126,7 @@ pub(crate) fn update_xsave_features_entry(
     entry: &mut kvm_cpuid_entry2,
     _vm_spec: &VmSpec,
 ) -> Result<(), Error> {
-    use crate::cpu_leaf::leaf_0xd::*;
+    use crate::cpuid::cpu_leaf::leaf_0xd::*;
 
     if entry.index == 0 {
         // MPX is masked out with the current template so the size in bytes of the save
@@ -163,7 +161,7 @@ pub(crate) fn update_extended_feature_info_entry(
     entry: &mut kvm_cpuid_entry2,
     _vm_spec: &VmSpec,
 ) -> Result<(), Error> {
-    use crate::cpu_leaf::leaf_0x80000001::*;
+    use crate::cpuid::cpu_leaf::leaf_0x80000001::*;
 
     entry
         .ecx
@@ -179,7 +177,7 @@ pub(crate) fn update_extended_feature_extensions_entry(
     entry: &mut kvm_cpuid_entry2,
     _vm_spec: &VmSpec,
 ) -> Result<(), Error> {
-    use crate::cpu_leaf::leaf_0x80000008::*;
+    use crate::cpuid::cpu_leaf::leaf_0x80000008::*;
 
     entry.ebx.write_bit(ebx::WBNOINVD_BITINDEX, false);
 
