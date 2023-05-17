@@ -7,17 +7,17 @@
 import os
 import platform
 import resource
-import subprocess
 import time
 
+import packaging.version
 import pytest
 
-import framework.utils_cpuid as utils
 import host_tools.drive as drive_tools
 import host_tools.network as net_tools
+from framework import utils_cpuid
 from framework.artifacts import NetIfaceConfig, SnapshotType
 from framework.builder import MicrovmBuilder, SnapshotBuilder
-from framework.utils import is_io_uring_supported
+from framework.utils import get_firecracker_version_from_toml, is_io_uring_supported
 
 MEM_LIMIT = 1000000000
 
@@ -469,7 +469,7 @@ def test_api_machine_config(test_microvm_with_api):
         assert test_microvm.api_session.is_status_no_content(response.status_code)
 
     response = test_microvm.actions.put(action_type="InstanceStart")
-    if utils.get_cpu_vendor() == utils.CpuVendor.AMD:
+    if utils_cpuid.get_cpu_vendor() == utils_cpuid.CpuVendor.AMD:
         # We shouldn't be able to apply Intel templates on AMD hosts
         fail_msg = "CPU vendor mismatched between actual CPU and CPU template"
         assert test_microvm.api_session.is_status_bad_request(response.status_code)
@@ -671,6 +671,15 @@ def test_rate_limiters_api_config(test_microvm_with_api):
             "ops": {"size": 1, "refill_time": 100},
         },
         tx_rate_limiter={
+            "bandwidth": {"size": 1000000, "refill_time": 100},
+            "ops": {"size": 1, "refill_time": 100},
+        },
+    )
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+
+    # Test entropy device bw and ops rate-limiting.
+    response = test_microvm.entropy.put(
+        rate_limiter={
             "bandwidth": {"size": 1000000, "refill_time": 100},
             "ops": {"size": 1, "refill_time": 100},
         },
@@ -1008,19 +1017,13 @@ def test_api_version(test_microvm_with_api):
     # Validate VM version post-boot is the same as pre-boot.
     assert preboot_response.json() == postboot_response.json()
 
-    # Check that the version is the same as `git describe --dirty`.
-    # Abbreviated to post-tag commit metadata
-    out = subprocess.check_output(["git", "describe", "--dirty"]).decode()
-
-    # Skip the "v" at the start
-    tag_version = out[1:].strip()
-
-    # Git tag should match FC API version
-    assert (
-        tag_version == preboot_response.json()["firecracker_version"]
-    ), "Expected [{}], Actual [{}]".format(
-        preboot_response.json()["firecracker_version"], tag_version
+    cargo_version = get_firecracker_version_from_toml()
+    api_version = packaging.version.parse(
+        preboot_response.json()["firecracker_version"]
     )
+
+    # Cargo version should match FC API version
+    assert cargo_version == api_version
 
 
 def test_api_vsock(bin_cloner_path):
@@ -1061,6 +1064,31 @@ def _test_vsock(vm):
     # Updating an existing vsock should not be fine at this point.
     response = vm.vsock.put(guest_cid=17, uds_path="vsock.sock")
     assert vm.api_session.is_status_bad_request(response.status_code)
+
+
+def test_api_entropy(test_microvm_with_api):
+    """
+    Test entropy related API commands.
+
+    @type: functional
+    """
+    test_microvm = test_microvm_with_api
+    test_microvm.spawn()
+    test_microvm.basic_config()
+
+    # Create a new entropy device should be OK.
+    response = test_microvm.entropy.put()
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+
+    # Overwriting an existing should be OK.
+    response = test_microvm.entropy.put()
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+
+    # Start the microvm
+    test_microvm.start()
+
+    response = test_microvm.entropy.put()
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
 
 
 def test_api_balloon(test_microvm_with_api):
@@ -1163,7 +1191,7 @@ def test_get_full_config_after_restoring_snapshot(bin_cloner_path):
     test_microvm = vm_instance.vm
     root_disk = vm_instance.disks[0]
     ssh_key = vm_instance.ssh_key
-    cpu_vendor = utils.get_cpu_vendor()
+    cpu_vendor = utils_cpuid.get_cpu_vendor()
 
     setup_cfg = {}
 
@@ -1175,10 +1203,10 @@ def test_get_full_config_after_restoring_snapshot(bin_cloner_path):
         "track_dirty_pages": False,
     }
 
-    if cpu_vendor == utils.CpuVendor.ARM:
+    if cpu_vendor == utils_cpuid.CpuVendor.ARM:
         setup_cfg["machine-config"]["smt"] = False
 
-    if cpu_vendor == utils.CpuVendor.INTEL:
+    if cpu_vendor == utils_cpuid.CpuVendor.INTEL:
         setup_cfg["machine-config"]["cpu_template"] = "C3"
 
     test_microvm.machine_cfg.patch(**setup_cfg["machine-config"])
@@ -1271,6 +1299,9 @@ def test_get_full_config_after_restoring_snapshot(bin_cloner_path):
         "ipv4_address": "169.254.169.254",
         "network_interfaces": [net_iface.dev_name],
     }
+
+    # We should expect a null entropy device
+    expected_cfg["entropy"] = None
 
     # Validate full vm configuration post-restore.
     response = microvm.full_cfg.get()
@@ -1372,6 +1403,9 @@ def test_get_full_config(test_microvm_with_api):
         "ipv4_address": "169.254.169.250",
         "network_interfaces": ["1"],
     }
+
+    # We should expect a null entropy device
+    expected_cfg["entropy"] = None
 
     # Getting full vm configuration should be available pre-boot.
     response = test_microvm.full_cfg.get()

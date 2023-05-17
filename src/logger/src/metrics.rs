@@ -791,6 +791,24 @@ pub struct VsockDeviceMetrics {
     pub rx_read_fails: SharedIncMetric,
 }
 
+#[derive(Default, Serialize)]
+pub struct EntropyDeviceMetrics {
+    /// Number of device activation failures
+    pub activate_fails: SharedIncMetric,
+    /// Number of entropy queue event handling failures
+    pub entropy_event_fails: SharedIncMetric,
+    /// Number of entropy requests handled
+    pub entropy_event_count: SharedIncMetric,
+    /// Number of entropy bytes provided to guest
+    pub entropy_bytes: SharedIncMetric,
+    /// Number of errors while getting random bytes on host
+    pub host_rng_fails: SharedIncMetric,
+    /// Number of times an entropy request was rate limited
+    pub entropy_rate_limiter_throttled: SharedIncMetric,
+    /// Number of events associated with the rate limiter
+    pub rate_limiter_event_count: SharedIncMetric,
+}
+
 // The sole purpose of this struct is to produce an UTC timestamp when an instance is serialized.
 #[derive(Default)]
 struct SerializeToUtcTimestampMs;
@@ -846,6 +864,8 @@ pub struct FirecrackerMetrics {
     pub signals: SignalMetrics,
     /// Metrics related to virtio-vsockets.
     pub vsock: VsockDeviceMetrics,
+    /// Metrics related to virtio-rng entropy device.
+    pub entropy: EntropyDeviceMetrics,
 }
 
 #[cfg(test)]

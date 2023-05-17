@@ -4,7 +4,7 @@
 use std::fs::{read_to_string, write};
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use vmm::cpu_config::templates::{CustomCpuTemplate, GetCpuTemplate, GetCpuTemplateError};
 
 mod fingerprint;
@@ -18,6 +18,8 @@ enum Error {
     #[error("Failed to operate file: {0}")]
     FileIo(#[from] std::io::Error),
     #[error("{0}")]
+    FingerprintCompare(#[from] fingerprint::compare::Error),
+    #[error("{0}")]
     FingerprintDump(#[from] fingerprint::dump::Error),
     #[error("CPU template is not specified: {0}")]
     NoCpuTemplate(#[from] GetCpuTemplateError),
@@ -27,6 +29,8 @@ enum Error {
     Utils(#[from] utils::Error),
     #[error("{0}")]
     TemplateDump(#[from] template::dump::Error),
+    #[error("{0}")]
+    TemplateStrip(#[from] template::strip::Error),
     #[error("{0}")]
     TemplateVerify(#[from] template::verify::Error),
 }
@@ -89,6 +93,24 @@ enum FingerprintOperation {
         #[arg(short, long, value_name = "PATH", default_value = "fingerprint.json")]
         output: PathBuf,
     },
+    /// Compare two fingerprint files with queries.
+    Compare {
+        /// Path of fingerprint file that stores the previous state at CPU template creation.
+        #[arg(short, long, value_name = "PATH")]
+        prev: PathBuf,
+        /// Path of fingerprint file that stores the current state.
+        #[arg(short, long, value_name = "PATH")]
+        curr: PathBuf,
+        /// List of fields to be compared.
+        #[arg(
+            short,
+            long,
+            value_enum,
+            num_args = 1..,
+            default_values_t = fingerprint::FingerprintField::value_variants()
+        )]
+        filters: Vec<fingerprint::FingerprintField>,
+    },
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -111,7 +133,7 @@ fn run(cli: Cli) -> Result<()> {
                     templates.push(template);
                 }
 
-                let stripped_templates = template::strip::strip(templates);
+                let stripped_templates = template::strip::strip(templates)?;
 
                 for (path, template) in paths.into_iter().zip(stripped_templates.into_iter()) {
                     let path = utils::add_suffix(&path, &suffix);
@@ -142,6 +164,17 @@ fn run(cli: Cli) -> Result<()> {
 
                 let fingerprint_json = serde_json::to_string_pretty(&fingerprint)?;
                 write(output, fingerprint_json)?;
+            }
+            FingerprintOperation::Compare {
+                prev,
+                curr,
+                filters,
+            } => {
+                let prev_json = read_to_string(prev)?;
+                let prev: fingerprint::Fingerprint = serde_json::from_str(&prev_json)?;
+                let curr_json = read_to_string(curr)?;
+                let curr: fingerprint::Fingerprint = serde_json::from_str(&curr_json)?;
+                fingerprint::compare::compare(prev, curr, filters)?;
             }
         },
     }
@@ -226,62 +259,74 @@ mod tests {
         config_file
     }
 
-    // Build modifiers for x86_64 that should work correctly with a sample CPU template and a sample
-    // guest CPU config.
+    // Sample modifiers for x86_64 that should work correctly as a CPU template and a guest CPU
+    // config.
     // * CPUID leaf 0x0 / subleaf 0x0 / register eax indicates the maximum input EAX value for basic
     //   CPUID information.
     // * MSR index 0x4b564d00 indicates MSR_KVM_WALL_CLOCK_NEW.
     #[cfg(target_arch = "x86_64")]
-    fn generate_sample_modifiers() -> TempFile {
+    const SAMPLE_MODIFIERS: &str = r#"
+    {
+        "cpuid_modifiers": [
+            {
+                "leaf": "0x0",
+                "subleaf": "0x0",
+                "flags": 0,
+                "modifiers": [
+                    {
+                        "register": "eax",
+                        "bitmap": "0b00000000000000000000000000000001"
+                    }
+                ]
+            }
+        ],
+        "msr_modifiers": [
+            {
+                "addr": "0x4b564d00",
+                "bitmap": "0b0000000000000000000000000000000000000000000000000000000000000001"
+            }
+        ]
+    }"#;
+
+    // Sample modifiers for aarch64 that should work correctly as a CPU template and a guest CPU
+    // config.
+    // * Register ID 0x6030000000100002 indicates X1 register.
+    #[cfg(target_arch = "aarch64")]
+    const SAMPLE_MODIFIERS: &str = r#"
+    {
+        "reg_modifiers": [
+            {
+                "addr": "0x6030000000100002",
+                "bitmap": "0b00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
+            }
+        ]
+    }"#;
+
+    // Build a sample custom CPU template.
+    fn generate_sample_template() -> TempFile {
         let file = TempFile::new().unwrap();
-        file
-            .as_file()
-            .write_all(
-                r#"{
-                    "cpuid_modifiers": [
-                        {
-                            "leaf": "0x0",
-                            "subleaf": "0x0",
-                            "flags": 0,
-                            "modifiers": [
-                                {
-                                    "register": "eax",
-                                    "bitmap": "0b00000000000000000000000000000001"
-                                }
-                            ]
-                        }
-                    ],
-                    "msr_modifiers": [
-                        {
-                            "addr": "0x4b564d00",
-                            "bitmap": "0b0000000000000000000000000000000000000000000000000000000000000001"
-                        }
-                    ]
-                }"#
-                .as_bytes(),
-            )
+        file.as_file()
+            .write_all(SAMPLE_MODIFIERS.as_bytes())
             .unwrap();
         file
     }
 
-    // Build modifiers for aarch64 that should work correctly as a sample CPU template and a sample
-    // guest CPU config.
-    // * Register ID 0x6030000000100002 indicates X1 register.
-    #[cfg(target_arch = "aarch64")]
-    fn generate_sample_modifiers() -> TempFile {
+    // Build a sample fingerprint file.
+    fn generate_sample_fingerprint() -> TempFile {
+        let fingerprint = fingerprint::Fingerprint {
+            firecracker_version: crate::utils::CPU_TEMPLATE_HELPER_VERSION.to_string(),
+            kernel_version: "sample_kernel_version".to_string(),
+            microcode_version: "sample_microcode_version".to_string(),
+            bios_version: "sample_bios_version".to_string(),
+            bios_revision: "sample_bios_revision".to_string(),
+            guest_cpu_config: serde_json::from_slice(SAMPLE_MODIFIERS.as_bytes()).unwrap(),
+        };
         let file = TempFile::new().unwrap();
-        file
-            .as_file()
+        file.as_file()
             .write_all(
-                r#"{
-                    "reg_modifiers": [
-                        {
-                            "addr": "0x6030000000100002",
-                            "bitmap": "0b00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
-                        }
-                    ]
-                }"#
-                .as_bytes(),
+                serde_json::to_string_pretty(&fingerprint)
+                    .unwrap()
+                    .as_bytes(),
             )
             .unwrap();
         file
@@ -314,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_template_strip_command() {
-        let files = vec![generate_sample_modifiers(), generate_sample_modifiers()];
+        let files = vec![generate_sample_template(), generate_sample_template()];
 
         let mut args = vec!["cpu-template-helper", "template", "strip", "-p"];
         let paths = files
@@ -331,7 +376,7 @@ mod tests {
     fn test_template_verify_command() {
         let kernel_image_path = kernel_image_path(None);
         let rootfs_file = TempFile::new().unwrap();
-        let template_file = generate_sample_modifiers();
+        let template_file = generate_sample_template();
         let config_file = generate_config_file(
             &kernel_image_path,
             rootfs_file.as_path().to_str().unwrap(),
@@ -370,6 +415,33 @@ mod tests {
             "--output",
             output_file.as_path().to_str().unwrap(),
         ];
+        let cli = Cli::parse_from(args);
+
+        run(cli).unwrap();
+    }
+
+    #[test]
+    fn test_fingerprint_compare_command() {
+        let fingerprint_file1 = generate_sample_fingerprint();
+        let fingerprint_file2 = generate_sample_fingerprint();
+        let filters = fingerprint::FingerprintField::value_variants()
+            .iter()
+            .map(|variant| variant.to_possible_value().unwrap().get_name().to_string())
+            .collect::<Vec<_>>();
+
+        let mut args = vec![
+            "cpu-template-helper",
+            "fingerprint",
+            "compare",
+            "--prev",
+            fingerprint_file1.as_path().to_str().unwrap(),
+            "--curr",
+            fingerprint_file2.as_path().to_str().unwrap(),
+            "--filters",
+        ];
+        for filter in &filters {
+            args.push(filter);
+        }
         let cli = Cli::parse_from(args);
 
         run(cli).unwrap();
