@@ -20,11 +20,25 @@ pub mod arch_gen;
 /// Supported platforms: x86_64 and aarch64.
 pub mod arch;
 
+/// High-level interface over Linux io_uring.
+///
+/// Aims to provide an easy-to-use interface, while making some Firecracker-specific simplifying
+/// assumptions. The crate does not currently aim at supporting all io_uring features and use
+/// cases. For example, it only works with pre-registered fds and read/write/fsync requests.
+///
+/// Requires at least kernel version 5.10.51.
+/// For more information on io_uring, refer to the man pages.
+/// [This pdf](https://kernel.dk/io_uring.pdf) is also very useful, though outdated at times.
+pub mod io_uring;
+
 /// Handles setup and initialization a `Vmm` object.
 pub mod builder;
 /// Types for guest configuration.
 pub mod cpu_config;
 pub(crate) mod device_manager;
+/// Emulates virtual and hardware devices.
+#[allow(missing_docs)]
+pub mod devices;
 pub mod memory_snapshot;
 /// Save/restore utilities.
 pub mod persist;
@@ -42,6 +56,7 @@ pub mod utilities;
 pub mod version_map;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
+
 mod vstate;
 
 use std::collections::HashMap;
@@ -51,13 +66,6 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 use std::{fmt, io};
 
-use devices::legacy::{IER_RDA_BIT, IER_RDA_OFFSET};
-use devices::virtio::balloon::Error as BalloonError;
-use devices::virtio::{
-    Balloon, BalloonConfig, BalloonStats, Block, MmioTransport, Net, BALLOON_DEV_ID, TYPE_BALLOON,
-    TYPE_BLOCK, TYPE_NET,
-};
-use devices::BusDevice;
 use event_manager::{EventManager as BaseEventManager, EventOps, Events, MutEventSubscriber};
 use logger::{error, info, warn, LoggerError, MetricsError, METRICS};
 use rate_limiter::BucketUpdate;
@@ -74,6 +82,13 @@ use crate::cpu_config::templates::CpuConfiguration;
 #[cfg(target_arch = "x86_64")]
 use crate::device_manager::legacy::PortIODeviceManager;
 use crate::device_manager::mmio::MMIODeviceManager;
+use crate::devices::legacy::{IER_RDA_BIT, IER_RDA_OFFSET};
+use crate::devices::virtio::balloon::Error as BalloonError;
+use crate::devices::virtio::{
+    Balloon, BalloonConfig, BalloonStats, Block, MmioTransport, Net, BALLOON_DEV_ID, TYPE_BALLOON,
+    TYPE_BLOCK, TYPE_NET,
+};
+use crate::devices::BusDevice;
 use crate::memory_snapshot::SnapshotMemory;
 use crate::persist::{MicrovmState, MicrovmStateError, VmInfo};
 use crate::vmm_config::instance_info::{InstanceInfo, VmState};
@@ -449,7 +464,7 @@ impl Vmm {
     /// Sets RDA bit in serial console
     pub fn emulate_serial_init(&self) -> std::result::Result<(), EmulateSerialInitError> {
         #[cfg(target_arch = "aarch64")]
-        use devices::legacy::SerialDevice;
+        use crate::devices::legacy::SerialDevice;
         #[cfg(target_arch = "x86_64")]
         let mut serial = self
             .pio_device_manager
