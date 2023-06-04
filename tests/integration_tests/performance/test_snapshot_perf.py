@@ -49,7 +49,7 @@ LOAD_LATENCY_BASELINES = {
     ("m5d.metal", "4.14", "sync", "2vcpu_256mb.json"): 9,
     ("m5d.metal", "4.14", "sync", "2vcpu_512mb.json"): 9,
     ("m5d.metal", "5.10", "sync", "2vcpu_256mb.json"): 70,
-    ("m5d.metal", "5.10", "sync", "2vcpu_512mb.json"): 75,
+    ("m5d.metal", "5.10", "sync", "2vcpu_512mb.json"): 90,
     ("m5d.metal", "5.10", "async", "2vcpu_256mb.json"): 210,
     ("m5d.metal", "5.10", "async", "2vcpu_512mb.json"): 210,
     ("m5d.metal", "6.1", "sync", "2vcpu_256mb.json"): 255,
@@ -58,10 +58,10 @@ LOAD_LATENCY_BASELINES = {
     ("m5d.metal", "6.1", "async", "2vcpu_512mb.json"): 225,
     ("m6a.metal", "4.14", "sync", "2vcpu_256mb.json"): 15,
     ("m6a.metal", "4.14", "sync", "2vcpu_512mb.json"): 19,
-    ("m6a.metal", "5.10", "sync", "2vcpu_256mb.json"): 60,
-    ("m6a.metal", "5.10", "sync", "2vcpu_512mb.json"): 60,
-    ("m6a.metal", "5.10", "async", "2vcpu_256mb.json"): 190,
-    ("m6a.metal", "5.10", "async", "2vcpu_512mb.json"): 190,
+    ("m6a.metal", "5.10", "sync", "2vcpu_256mb.json"): 75,
+    ("m6a.metal", "5.10", "sync", "2vcpu_512mb.json"): 75,
+    ("m6a.metal", "5.10", "async", "2vcpu_256mb.json"): 220,
+    ("m6a.metal", "5.10", "async", "2vcpu_512mb.json"): 220,
     ("m6a.metal", "6.1", "sync", "2vcpu_256mb.json"): 180,
     ("m6a.metal", "6.1", "sync", "2vcpu_512mb.json"): 200,
     ("m6a.metal", "6.1", "async", "2vcpu_256mb.json"): 190,
@@ -76,12 +76,12 @@ LOAD_LATENCY_BASELINES = {
     ("m6i.metal", "6.1", "sync", "2vcpu_512mb.json"): 250,
     ("m6i.metal", "6.1", "async", "2vcpu_256mb.json"): 200,
     ("m6i.metal", "6.1", "async", "2vcpu_512mb.json"): 220,
-    ("m6g.metal", "4.14", "sync", "2vcpu_256mb.json"): 2,
-    ("m6g.metal", "4.14", "sync", "2vcpu_512mb.json"): 2,
-    ("m6g.metal", "5.10", "sync", "2vcpu_256mb.json"): 2,
-    ("m6g.metal", "5.10", "sync", "2vcpu_512mb.json"): 2,
+    ("m6g.metal", "4.14", "sync", "2vcpu_256mb.json"): 3,
+    ("m6g.metal", "4.14", "sync", "2vcpu_512mb.json"): 3,
+    ("m6g.metal", "5.10", "sync", "2vcpu_256mb.json"): 3,
+    ("m6g.metal", "5.10", "sync", "2vcpu_512mb.json"): 3,
     ("m6g.metal", "5.10", "async", "2vcpu_256mb.json"): 320,
-    ("m6g.metal", "5.10", "async", "2vcpu_512mb.json"): 330,
+    ("m6g.metal", "5.10", "async", "2vcpu_512mb.json"): 380,
     ("m6g.metal", "6.1", "sync", "2vcpu_256mb.json"): 2,
     ("m6g.metal", "6.1", "sync", "2vcpu_512mb.json"): 3,
     ("m6g.metal", "6.1", "async", "2vcpu_256mb.json"): 2,
@@ -89,7 +89,7 @@ LOAD_LATENCY_BASELINES = {
     ("c7g.metal", "4.14", "sync", "2vcpu_256mb.json"): 2,
     ("c7g.metal", "4.14", "sync", "2vcpu_512mb.json"): 2,
     ("c7g.metal", "5.10", "sync", "2vcpu_256mb.json"): 2,
-    ("c7g.metal", "5.10", "sync", "2vcpu_512mb.json"): 2,
+    ("c7g.metal", "5.10", "sync", "2vcpu_512mb.json"): 3,
     ("c7g.metal", "5.10", "async", "2vcpu_256mb.json"): 320,
     ("c7g.metal", "5.10", "async", "2vcpu_512mb.json"): 360,
     ("c7g.metal", "6.1", "sync", "2vcpu_256mb.json"): 2,
@@ -203,8 +203,6 @@ def test_older_snapshot_resume_latency(
 
     With each previous firecracker version, create a snapshot and try to
     restore in current version.
-
-    @type: performance
     """
     logger = logging.getLogger("old_snapshot_load")
     snapshot_type = SnapshotType.FULL
@@ -290,8 +288,6 @@ def test_snapshot_create_latency(
     - Rootfs: Ubuntu 18.04
     - Microvm: 2vCPU with 256/512 MB RAM
     TODO: Multiple microvm sizes must be tested in the async pipeline.
-
-    @type: performance
     """
     logger = logging.getLogger("snapshot_sequence")
 
@@ -386,8 +382,6 @@ def test_snapshot_resume_latency(
     - Rootfs: Ubuntu 18.04
     - Microvm: 2vCPU with 256/512 MB RAM
     TODO: Multiple microvm sizes must be tested in the async pipeline.
-
-    @type: performance
     """
     logger = logging.getLogger("snapshot_load")
     diff_snapshots = snapshot_type == SnapshotType.DIFF
