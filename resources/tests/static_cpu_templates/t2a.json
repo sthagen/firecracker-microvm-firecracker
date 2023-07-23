@@ -71,7 +71,7 @@
         },
         {
           "register": "edx",
-          "bitmap": "0bxxxxx00000xxxxxxxxxxxxxxxxxxxxxx"
+          "bitmap": "0bxxxxx00xx0xxxxxxxxxxxxxxxxxxxxxx"
         }
       ]
     },
@@ -82,7 +82,7 @@
       "modifiers": [
         {
           "register": "ebx",
-          "bitmap": "0bxxxxxxxxxxxx11xxxxxxxx0xxxxxx0x0"
+          "bitmap": "0bxxxxxxxxxxx111xxxxxxxx0xxxxxx0x0"
         }
       ]
     }
