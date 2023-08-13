@@ -9,11 +9,18 @@
 - Updated deserialization of `bitmap` for custom CPU templates to allow usage
   of '_' as a separator.
 - Changed the strip feature of `cpu-template-helper` tool to operate bitwise.
+- Better logs during validation of CPU ID in snapshot restoration path. Also
+  Firecracker now does not fail if it can't get CPU ID from the host or
+  can't find CPU ID in the snapshot.
 
 ### Fixed
 
+- Fixed a change in behavior of normalize host brand string that breaks
+  Firecracker on external instances.
 - Fixed the T2A CPU template not to unset the MMX bit (CPUID.80000001h:EDX[23])
   and the FXSR bit (CPUID.80000001h:EDX[24]).
+- Fixed the T2A CPU template to set the RstrFpErrPtrs bit
+  (CPUID.80000008h:EBX[2]).
 
 ## [1.4.0]
 
