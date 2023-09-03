@@ -11,7 +11,6 @@ import platform
 import re
 import signal
 import subprocess
-import threading
 import time
 import typing
 from collections import defaultdict, namedtuple
@@ -238,27 +237,6 @@ class CmdBuilder:
         return cmd
 
 
-class StoppableThread(threading.Thread):
-    """
-    Thread class with a stop() method.
-
-    The thread itself has to check regularly for the stopped() condition.
-    """
-
-    def __init__(self, *args, **kwargs):
-        """Set up a Stoppable thread."""
-        super().__init__(*args, **kwargs)
-        self._should_stop = False
-
-    def stop(self):
-        """Set that the thread should stop."""
-        self._should_stop = True
-
-    def stopped(self):
-        """Check if the thread was stopped."""
-        return self._should_stop
-
-
 # pylint: disable=R0903
 class DictQuery:
     """Utility class to query python dicts key paths.
@@ -394,9 +372,7 @@ def get_free_mem_ssh(ssh_connection):
     :param ssh_connection: connection to the guest
     :return: available mem column output of 'free'
     """
-    _, stdout, stderr = ssh_connection.execute_command(
-        "cat /proc/meminfo | grep MemAvailable"
-    )
+    _, stdout, stderr = ssh_connection.run("cat /proc/meminfo | grep MemAvailable")
     assert stderr == ""
 
     # Split "MemAvailable:   123456 kB" and validate it
@@ -540,7 +516,7 @@ def summarize_cpu_percent(cpu_percentages: dict):
 
 def run_guest_cmd(ssh_connection, cmd, expected, use_json=False):
     """Runs a shell command at the remote accessible via SSH"""
-    _, stdout, stderr = ssh_connection.execute_command(cmd)
+    _, stdout, stderr = ssh_connection.run(cmd)
     assert stderr == ""
     stdout = stdout if not use_json else json.loads(stdout)
     assert stdout == expected
@@ -633,7 +609,7 @@ def generate_mmds_session_token(ssh_connection, ipv4_address, token_ttl):
     cmd += " -X PUT"
     cmd += ' -H  "X-metadata-token-ttl-seconds: {}"'.format(token_ttl)
     cmd += " http://{}/latest/api/token".format(ipv4_address)
-    _, stdout, _ = ssh_connection.execute_command(cmd)
+    _, stdout, _ = ssh_connection.run(cmd)
     token = stdout
 
     return token
@@ -672,23 +648,17 @@ def configure_mmds(
     if ipv4_address:
         mmds_config["ipv4_address"] = ipv4_address
 
-    response = test_microvm.mmds.put_config(json=mmds_config)
-    assert test_microvm.api_session.is_status_no_content(response.status_code)
-
+    response = test_microvm.api.mmds_config.put(**mmds_config)
     return response
 
 
 def populate_data_store(test_microvm, data_store):
     """Populate the MMDS data store of the microvm with the provided data"""
-    response = test_microvm.mmds.get()
-    assert test_microvm.api_session.is_status_ok(response.status_code)
+    response = test_microvm.api.mmds.get()
     assert response.json() == {}
 
-    response = test_microvm.mmds.put(json=data_store)
-    assert test_microvm.api_session.is_status_no_content(response.status_code)
-
-    response = test_microvm.mmds.get()
-    assert test_microvm.api_session.is_status_ok(response.status_code)
+    test_microvm.api.mmds.put(**data_store)
+    response = test_microvm.api.mmds.get()
     assert response.json() == data_store
 
 
@@ -745,7 +715,7 @@ def guest_run_fio_iteration(ssh_connection, iteration):
         --output /tmp/fio{} > /dev/null &""".format(
         iteration
     )
-    exit_code, _, stderr = ssh_connection.execute_command(fio)
+    exit_code, _, stderr = ssh_connection.run(fio)
     assert exit_code == 0, stderr
 
 
@@ -754,14 +724,14 @@ def check_filesystem(ssh_connection, disk_fmt, disk):
     if disk_fmt == "squashfs":
         return
     cmd = "fsck.{} -n {}".format(disk_fmt, disk)
-    exit_code, _, stderr = ssh_connection.execute_command(cmd)
+    exit_code, _, stderr = ssh_connection.run(cmd)
     assert exit_code == 0, stderr
 
 
 def check_entropy(ssh_connection):
     """Check that we can get random numbers from /dev/hwrng"""
     cmd = "dd if=/dev/hwrng of=/dev/null bs=4096 count=1"
-    exit_code, _, stderr = ssh_connection.execute_command(cmd)
+    exit_code, _, stderr = ssh_connection.run(cmd)
     assert exit_code == 0, stderr
 
 

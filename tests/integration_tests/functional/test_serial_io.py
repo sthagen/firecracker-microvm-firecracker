@@ -9,7 +9,6 @@ import subprocess
 import termios
 import time
 
-import host_tools.logging as log_tools
 from framework import utils
 from framework.microvm import Serial
 from framework.state_machine import TestState
@@ -181,19 +180,10 @@ def test_serial_block(test_microvm_with_api):
         boot_args="console=ttyS0 reboot=k panic=1 pci=off",
     )
     test_microvm.add_net_iface()
-
-    # Configure the metrics.
-    metrics_fifo_path = os.path.join(test_microvm.path, "metrics_fifo")
-    metrics_fifo = log_tools.Fifo(metrics_fifo_path)
-    response = test_microvm.metrics.put(
-        metrics_path=test_microvm.create_jailed_resource(metrics_fifo.path)
-    )
-    assert test_microvm.api_session.is_status_no_content(response.status_code)
-
     test_microvm.start()
 
     # Get an initial reading of missed writes to the serial.
-    fc_metrics = test_microvm.flush_metrics(metrics_fifo)
+    fc_metrics = test_microvm.flush_metrics()
     init_count = fc_metrics["uart"]["missed_write_count"]
 
     screen_pid = test_microvm.screen_pid
@@ -201,21 +191,47 @@ def test_serial_block(test_microvm_with_api):
     subprocess.check_call("kill -s STOP {}".format(screen_pid), shell=True)
 
     # Generate a random text file.
-    exit_code, _, _ = test_microvm.ssh.execute_command(
+    exit_code, _, _ = test_microvm.ssh.run(
         "base64 /dev/urandom | head -c 100000 > /tmp/file.txt"
     )
 
     # Dump output to terminal
-    exit_code, _, _ = test_microvm.ssh.execute_command("cat /tmp/file.txt > /dev/ttyS0")
+    exit_code, _, _ = test_microvm.ssh.run("cat /tmp/file.txt > /dev/ttyS0")
     assert exit_code == 0
 
     # Check that the vCPU isn't blocked.
-    exit_code, _, _ = test_microvm.ssh.execute_command("cd /")
+    exit_code, _, _ = test_microvm.ssh.run("cd /")
     assert exit_code == 0
 
     # Check the metrics to see if the serial missed bytes.
-    fc_metrics = test_microvm.flush_metrics(metrics_fifo)
+    fc_metrics = test_microvm.flush_metrics()
     last_count = fc_metrics["uart"]["missed_write_count"]
 
     # Should be significantly more than before the `cat` command.
     assert last_count - init_count > 10000
+
+
+REGISTER_FAILED_WARNING = "Failed to register serial input fd: event_manager: failed to manage epoll file descriptor: Operation not permitted (os error 1)"
+
+
+def test_no_serial_fd_error_when_daemonized(uvm_plain):
+    """
+    Tests that when running firecracker daemonized, the serial device
+    does not try to register stdin to epoll (which would fail due to stdin no
+    longer being pointed at a terminal).
+
+    Regression test for #4037.
+    """
+
+    test_microvm = uvm_plain
+    test_microvm.spawn()
+    test_microvm.add_net_iface()
+    test_microvm.basic_config(
+        vcpu_count=1,
+        mem_size_mib=512,
+    )
+    test_microvm.start()
+
+    test_microvm.ssh.run("true")
+
+    assert REGISTER_FAILED_WARNING not in test_microvm.log_data

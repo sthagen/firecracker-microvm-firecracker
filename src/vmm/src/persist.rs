@@ -37,7 +37,9 @@ use crate::memory_snapshot::{GuestMemoryState, SnapshotMemory};
 use crate::resources::VmResources;
 #[cfg(target_arch = "x86_64")]
 use crate::version_map::FC_V0_23_SNAP_VERSION;
-use crate::version_map::{FC_V1_0_SNAP_VERSION, FC_V1_1_SNAP_VERSION, FC_VERSION_TO_SNAP_VERSION};
+use crate::version_map::{
+    FC_V1_0_SNAP_VERSION, FC_V1_1_SNAP_VERSION, FC_V1_5_SNAP_VERSION, FC_VERSION_TO_SNAP_VERSION,
+};
 use crate::vmm_config::boot_source::BootSourceConfig;
 use crate::vmm_config::instance_info::InstanceInfo;
 use crate::vmm_config::machine_config::MAX_SUPPORTED_VCPUS;
@@ -119,7 +121,7 @@ impl From<&VmResources> for VmInfo {
 }
 
 /// Contains the necesary state for saving/restoring a microVM.
-#[derive(Debug, Versionize)]
+#[derive(Debug, Default, Versionize)]
 // NOTICE: Any changes to this structure require a snapshot version bump.
 pub struct MicrovmState {
     /// Miscellaneous VM info.
@@ -244,6 +246,8 @@ pub fn create_snapshot(
         .save_state(vm_info)
         .map_err(CreateSnapshotError::MicrovmState)?;
 
+    extra_version_check(&microvm_state, snapshot_data_version)?;
+
     snapshot_state_to_file(
         &microvm_state,
         &params.snapshot_path,
@@ -354,6 +358,24 @@ pub fn get_snapshot_data_version(
     }
 
     Ok(data_version)
+}
+
+/// Additional checks on snapshot version dependent on microvm saved state.
+pub fn extra_version_check(
+    microvm_state: &MicrovmState,
+    version: u16,
+) -> Result<(), CreateSnapshotError> {
+    // We forbid snapshots older than 1.5 if any additional capabilities are requested
+    if !microvm_state.vm_state.kvm_cap_modifiers.is_empty() && version < FC_V1_5_SNAP_VERSION {
+        return Err(CreateSnapshotError::UnsupportedVersion);
+    }
+
+    // We forbid snapshots older then 1.5 if any additional vcpu features are requested
+    #[cfg(target_arch = "aarch64")]
+    if microvm_state.vcpu_states[0].kvi.is_some() && version < FC_V1_5_SNAP_VERSION {
+        return Err(CreateSnapshotError::UnsupportedVersion);
+    }
+    Ok(())
 }
 
 /// Validates that snapshot CPU vendor matches the host CPU vendor.
@@ -559,8 +581,9 @@ fn snapshot_state_from_file(
         File::open(snapshot_path).map_err(SnapshotStateFromFileError::Open)?;
     let metadata = std::fs::metadata(snapshot_path).map_err(SnapshotStateFromFileError::Meta)?;
     let snapshot_len = metadata.len() as usize;
-    Snapshot::load(&mut snapshot_reader, snapshot_len, version_map)
-        .map_err(SnapshotStateFromFileError::Load)
+    let (state, _) = Snapshot::load(&mut snapshot_reader, snapshot_len, version_map)
+        .map_err(SnapshotStateFromFileError::Load)?;
+    Ok(state)
 }
 
 /// Error type for [`guest_memory_from_file`].

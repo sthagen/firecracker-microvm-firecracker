@@ -39,7 +39,6 @@ def test_restore_old_to_current(
         rootfs_ubuntu_22,
         fc_binary_path=firecracker_release.path,
         jailer_binary_path=firecracker_release.jailer,
-        monitor_memory=diff_snapshots,
     )
     vm.spawn()
     vm.basic_config(track_dirty_pages=True)
@@ -83,7 +82,6 @@ def test_restore_current_to_old(microvm_factory, uvm_plain, firecracker_release)
     vm = microvm_factory.build(
         fc_binary_path=firecracker_release.path,
         jailer_binary_path=firecracker_release.jailer,
-        monitor_memory=True,
     )
     vm.spawn()
     vm.restore_from_snapshot(snapshot, resume=True)
@@ -108,12 +106,12 @@ def validate_all_devices(microvm, balloon):
     for iface in microvm.iface.values():
         print("Testing net device", iface["iface"].dev_name)
         microvm.guest_ip = iface["iface"].guest_ip
-        exit_code, _, _ = microvm.ssh.execute_command("sync")
+        exit_code, _, _ = microvm.ssh.run("sync")
 
     # Drop page cache.
     # Ensure further reads are going to be served from emulation layer.
     cmd = "sync; echo 1 > /proc/sys/vm/drop_caches"
-    exit_code, _, _ = microvm.ssh.execute_command(cmd)
+    exit_code, _, _ = microvm.ssh.run(cmd)
     assert exit_code == 0
 
     # Validate checksum of /dev/vdX/test.
@@ -123,12 +121,12 @@ def validate_all_devices(microvm, balloon):
         # Mount block device.
         print("Testing drive ", drive)
         cmd = f"mkdir -p /tmp/{drive} ; mount /dev/{drive} /tmp/{drive}"
-        exit_code, _, _ = microvm.ssh.execute_command(cmd)
+        exit_code, _, _ = microvm.ssh.run(cmd)
         assert exit_code == 0
 
         # Validate checksum.
         cmd = f"md5sum /tmp/{drive}/test | cut -d ' ' -f 1"
-        exit_code, stdout, _ = microvm.ssh.execute_command(cmd)
+        exit_code, stdout, _ = microvm.ssh.run(cmd)
         assert exit_code == 0
         assert stdout.strip() == "ab893875d697a3145af5eed5309bee26"
         print("* checksum OK.")
@@ -155,10 +153,9 @@ def create_snapshot_helper(
 
     if balloon:
         # Add a memory balloon with stats enabled.
-        response = vm.balloon.put(
+        vm.api.balloon.put(
             amount_mib=0, deflate_on_oom=True, stats_polling_interval_s=1
         )
-        assert vm.api_session.is_status_no_content(response.status_code)
 
     test_drives = [] if drives is None else drives
 
@@ -178,25 +175,25 @@ def create_snapshot_helper(
 
     # Iterate and validate connectivity on all ifaces after boot.
     for i in range(4):
-        exit_code, _, _ = vm.ssh_iface(i).execute_command("sync")
+        exit_code, _, _ = vm.ssh_iface(i).run("sync")
         assert exit_code == 0
 
     # Mount scratch drives in guest.
     for blk in test_drives:
         # Create mount point and mount each device.
         cmd = f"mkdir -p /tmp/mnt/{blk} && mount /dev/{blk} /tmp/mnt/{blk}"
-        exit_code, _, _ = vm.ssh.execute_command(cmd)
+        exit_code, _, _ = vm.ssh.run(cmd)
         assert exit_code == 0
 
         # Create file using dd using O_DIRECT.
         # After resume we will compute md5sum on these files.
         dd = f"dd if=/dev/zero of=/tmp/mnt/{blk}/test bs=4096 count=10 oflag=direct"
-        exit_code, _, _ = vm.ssh.execute_command(dd)
+        exit_code, _, _ = vm.ssh.run(dd)
         assert exit_code == 0
 
         # Unmount the device.
         cmd = f"umount /dev/{blk}"
-        exit_code, _, _ = vm.ssh.execute_command(cmd)
+        exit_code, _, _ = vm.ssh.run(cmd)
         assert exit_code == 0
 
     snapshot = vm.make_snapshot(snapshot_type, target_version=target_version)

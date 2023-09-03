@@ -378,8 +378,7 @@ def _patch_iface_bw(test_microvm, iface_id, rx_or_tx, new_bucket_size, new_refil
             "bandwidth": {"size": new_bucket_size, "refill_time": new_refill_time}
         },
     }
-    resp = test_microvm.network.patch(**args)
-    assert test_microvm.api_session.is_status_no_content(resp.status_code)
+    test_microvm.api.network.patch(**args)
 
 
 def _start_iperf_server_on_guest(test_microvm, hostname):
@@ -387,7 +386,7 @@ def _start_iperf_server_on_guest(test_microvm, hostname):
     test_microvm.guest_ip = hostname
 
     iperf_cmd = "{} -sD -f KBytes\n".format(IPERF_BINARY)
-    test_microvm.ssh.execute_command(iperf_cmd)
+    test_microvm.ssh.run(iperf_cmd)
 
     # Wait for the iperf daemon to start.
     time.sleep(1)
@@ -396,7 +395,7 @@ def _start_iperf_server_on_guest(test_microvm, hostname):
 def _run_iperf_on_guest(test_microvm, iperf_cmd, hostname):
     """Run a client related iperf command through an SSH connection."""
     test_microvm.guest_ip = hostname
-    code, stdout, stderr = test_microvm.ssh.execute_command(iperf_cmd)
+    code, stdout, stderr = test_microvm.ssh.run(iperf_cmd)
     assert code == 0, f"stdout: {stdout}\nstderr: {stderr}"
     return stdout
 

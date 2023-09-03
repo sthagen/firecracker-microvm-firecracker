@@ -28,18 +28,20 @@ use crate::cpu_config::templates::{CpuConfiguration, GuestConfigError};
 use crate::vstate::vm::Vm;
 use crate::FcExitCode;
 
+/// Module with aarch64 vCPU implementation.
 #[cfg(target_arch = "aarch64")]
-pub(crate) mod aarch64;
+pub mod aarch64;
+/// Module with x86_64 vCPU implementation.
 #[cfg(target_arch = "x86_64")]
-pub(crate) mod x86_64;
+pub mod x86_64;
 
 #[cfg(target_arch = "aarch64")]
-pub(crate) use aarch64::{KvmVcpuError, *};
+pub use aarch64::{KvmVcpuError, *};
 #[cfg(target_arch = "x86_64")]
-pub(crate) use x86_64::{KvmVcpuError, *};
+pub use x86_64::{KvmVcpuError, *};
 
 /// Signal number (SIGRTMIN) used to kick Vcpus.
-pub(crate) const VCPU_RTSIG_OFFSET: i32 = 0;
+pub const VCPU_RTSIG_OFFSET: i32 = 0;
 
 /// Errors associated with the wrappers over KVM ioctls.
 #[derive(Debug, thiserror::Error)]
@@ -313,8 +315,8 @@ impl Vcpu {
                     .send(VcpuResponse::Resumed)
                     .expect("failed to send resume status");
             }
-            // SaveState or RestoreState cannot be performed on a running Vcpu.
-            Ok(VcpuEvent::SaveState) | Ok(VcpuEvent::RestoreState(_)) => {
+            // SaveState cannot be performed on a running Vcpu.
+            Ok(VcpuEvent::SaveState) => {
                 self.response_sender
                     .send(VcpuResponse::NotAllowed(String::from(
                         "save/restore unavailable while running",
@@ -373,22 +375,6 @@ impl Vcpu {
                         self.response_sender
                             .send(VcpuResponse::Error(VcpuError::VcpuResponse(err)))
                             .expect("vcpu channel unexpectedly closed");
-                    });
-
-                StateMachine::next(Self::paused)
-            }
-            Ok(VcpuEvent::RestoreState(vcpu_state)) => {
-                self.kvm_vcpu
-                    .restore_state(&vcpu_state)
-                    .map(|()| {
-                        self.response_sender
-                            .send(VcpuResponse::RestoredState)
-                            .expect("vcpu channel unexpectedly closed");
-                    })
-                    .unwrap_or_else(|err| {
-                        self.response_sender
-                            .send(VcpuResponse::Error(VcpuError::VcpuResponse(err)))
-                            .expect("vcpu channel unexpectedly closed")
                     });
 
                 StateMachine::next(Self::paused)
@@ -586,8 +572,6 @@ pub enum VcpuEvent {
     Pause,
     /// Event to resume the Vcpu.
     Resume,
-    /// Event to restore the state of a paused Vcpu.
-    RestoreState(Box<VcpuState>),
     /// Event to save the state of a paused Vcpu.
     SaveState,
     /// Event to dump CPU configuration of a paused Vcpu.
@@ -606,8 +590,6 @@ pub enum VcpuResponse {
     Paused,
     /// Vcpu is resumed.
     Resumed,
-    /// Vcpu state is restored.
-    RestoredState,
     /// Vcpu state is saved.
     SavedState(Box<VcpuState>),
     /// Vcpu is in the state where CPU config is dumped.
@@ -621,7 +603,6 @@ impl fmt::Debug for VcpuResponse {
             Paused => write!(f, "VcpuResponse::Paused"),
             Resumed => write!(f, "VcpuResponse::Resumed"),
             Exited(code) => write!(f, "VcpuResponse::Exited({:?})", code),
-            RestoredState => write!(f, "VcpuResponse::RestoredState"),
             SavedState(_) => write!(f, "VcpuResponse::SavedState"),
             Error(ref err) => write!(f, "VcpuResponse::Error({:?})", err),
             NotAllowed(ref reason) => write!(f, "VcpuResponse::NotAllowed({})", reason),
@@ -702,10 +683,14 @@ impl Drop for VcpuHandle {
     }
 }
 
+/// Vcpu emulation state.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum VcpuEmulation {
+    /// Handled.
     Handled,
+    /// Interrupted.
     Interrupted,
+    /// Stopped.
     Stopped,
 }
 
@@ -870,13 +855,12 @@ pub mod tests {
             // Guard match with no wildcard to make sure we catch new enum variants.
             match self {
                 Paused | Resumed | Exited(_) => (),
-                Error(_) | NotAllowed(_) | RestoredState | SavedState(_) | DumpedCpuConfig(_) => (),
+                Error(_) | NotAllowed(_) | SavedState(_) | DumpedCpuConfig(_) => (),
             };
             match (self, other) {
                 (Paused, Paused) | (Resumed, Resumed) => true,
                 (Exited(code), Exited(other_code)) => code == other_code,
                 (NotAllowed(_), NotAllowed(_))
-                | (RestoredState, RestoredState)
                 | (SavedState(_), SavedState(_))
                 | (DumpedCpuConfig(_), DumpedCpuConfig(_)) => true,
                 (Error(ref err), Error(ref other_err)) => {
@@ -893,18 +877,19 @@ pub mod tests {
         let (mut vm, gm) = setup_vm(mem_size);
 
         let exit_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
-        let vcpu;
+
         #[cfg(target_arch = "aarch64")]
-        {
-            vcpu = Vcpu::new(1, &vm, exit_evt).unwrap();
-            vcpu.kvm_vcpu.init(vm.fd()).unwrap();
+        let vcpu = {
+            let mut vcpu = Vcpu::new(1, &vm, exit_evt).unwrap();
+            vcpu.kvm_vcpu.init(vm.fd(), &[]).unwrap();
             vm.setup_irqchip(1).unwrap();
-        }
+            vcpu
+        };
         #[cfg(target_arch = "x86_64")]
-        {
+        let vcpu = {
             vm.setup_irqchip().unwrap();
-            vcpu = Vcpu::new(1, &vm, exit_evt).unwrap();
-        }
+            Vcpu::new(1, &vm, exit_evt).unwrap()
+        };
         (vm, vcpu, gm)
     }
 
@@ -1127,7 +1112,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_vcpu_save_restore_state_events() {
+    fn test_vcpu_save_state_events() {
         let (vcpu_handle, _vcpu_exit_evt) = vcpu_configured_for_boot();
 
         // Queue a Resume event, expect a response.
@@ -1147,21 +1132,14 @@ pub mod tests {
         vcpu_handle
             .send_event(VcpuEvent::SaveState)
             .expect("failed to send event to vcpu");
-        let vcpu_state = match vcpu_handle
+        match vcpu_handle
             .response_receiver()
             .recv_timeout(RECV_TIMEOUT_SEC)
             .expect("did not receive event response from vcpu")
         {
-            VcpuResponse::SavedState(state) => state,
+            VcpuResponse::SavedState(_) => {}
             _ => panic!("unexpected response"),
         };
-
-        // Queue a RestoreState event, expect success.
-        queue_event_expect_response(
-            &vcpu_handle,
-            VcpuEvent::RestoreState(vcpu_state),
-            VcpuResponse::RestoredState,
-        );
 
         vcpu_handle.send_event(VcpuEvent::Finish).unwrap();
     }

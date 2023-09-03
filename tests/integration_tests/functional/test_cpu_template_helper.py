@@ -11,7 +11,7 @@ import pytest
 from framework import utils
 from framework.defs import SUPPORTED_HOST_KERNELS
 from framework.properties import global_props
-from framework.utils_cpu_templates import skip_on_arm
+from framework.utils_cpu_templates import nonci_on_arm
 from framework.utils_cpuid import get_guest_cpuid
 from host_tools import cargo_build
 
@@ -68,8 +68,9 @@ class CpuTemplateHelper:
         cmd = (
             f"{self.binary} fingerprint compare"
             f" --prev {prev_path} --curr {curr_path}"
-            f" --filters {' '.join(filters)}"
         )
+        if filters:
+            cmd += f" --filters {' '.join(filters)}"
         utils.run_cmd(cmd)
 
 
@@ -83,7 +84,7 @@ def save_vm_config(microvm, tmp_path, custom_cpu_template=None):
     """
     Save VM config into JSON file.
     """
-    config_json = microvm.full_cfg.get().json()
+    config_json = microvm.api.vm_config.get().json()
     config_json["boot-source"]["kernel_image_path"] = str(microvm.kernel_file)
     config_json["drives"][0]["path_on_host"] = str(microvm.rootfs_file)
     if custom_cpu_template is not None:
@@ -128,6 +129,42 @@ def build_cpu_config_dict(cpu_config_path):
 # List of CPUID leaves / subleaves that are not enumerated in
 # KVM_GET_SUPPORTED_CPUID on Intel and AMD.
 UNAVAILABLE_CPUID_ON_DUMP_LIST = [
+    # KVM changed to not return the host's processor topology information on
+    # CPUID.Bh in the following commit (backported into kernel 5.10 and 6.1,
+    # but not into kernel 4.14 due to merge conflict), since it's confusing
+    # and the userspace VMM has to populate it with meaningful values.
+    # https://github.com/torvalds/linux/commit/45e966fcca03ecdcccac7cb236e16eea38cc18af
+    # Since Firecracker only populates subleaves 0 and 1 (thread level and core
+    # level) in the normalization process and the subleaf 2 is left empty or
+    # not listed, the subleaf 2 should be skipped when the userspace cpuid
+    # enumerates it.
+    (0xB, 0x2),
+    # On CPUID.12h, the subleaves 0 and 1 enumerate Intel SGX capability and
+    # attributes respectively, and subleaves 2 or higher enumerate Intel SGX
+    # EPC that is listed only when CPUID.07h:EBX[2] is 1, meaning that SGX is
+    # supported. However, as seen in CPU config baseline files, CPUID.07h:EBX[2]
+    # is 0 on all tested platforms. On the other hand, the userspace cpuid
+    # command enumerates subleaves up to 2 regardless of CPUID.07h:EBX[2].
+    # KVM_GET_SUPPORTED_CPUID returns 0 in CPUID.12h.0 and firecracker passes
+    # it as it is, so here we ignore subleaves 1 and 2.
+    (0x12, 0x1),
+    (0x12, 0x2),
+    # CPUID.18h enumerates deterministic address translation parameters and the
+    # subleaf 0 reports the maximum supported subleaf in EAX, and all the tested
+    # platforms reports 0 in EAX. However, the userspace cpuid command in ubuntu
+    # 22 also lists the subleaf 1.
+    (0x18, 0x1),
+    # CPUID.1Bh enumerates PCONFIG information. The availability of PCONFIG is
+    # enumerated in CPUID.7h.0:EDX[18]. While all the supported platforms don't
+    # support it, the userspace cpuid command in ubuntu 22 reports not only
+    # the subleaf 0 but also the subleaf 1.
+    (0x1B, 0x1),
+    # CPUID.20000000h is not documented in Intel SDM and AMD APM. KVM doesn't
+    # report it, but the userspace cpuid command in ubuntu 22 does.
+    (0x20000000, 0x0),
+    # CPUID.40000100h is Xen-specific leaf.
+    # https://xenbits.xen.org/docs/4.6-testing/hypercall/x86_64/include,public,arch-x86,cpuid.h.html
+    (0x40000100, 0x0),
     # CPUID.8000001Bh or later are not supported on kernel 4.14 with an
     # exception CPUID.8000001Dh and CPUID.8000001Eh normalized by firecracker.
     # https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/arch/x86/kvm/cpuid.c?h=v4.14.313#n637
@@ -220,7 +257,7 @@ def get_guest_msrs(microvm, msr_index_list):
         if index in MSR_EXCEPTION_LIST:
             continue
         rdmsr_cmd = f"rdmsr -0 {index}"
-        code, stdout, stderr = microvm.ssh.execute_command(rdmsr_cmd)
+        code, stdout, stderr = microvm.ssh.run(rdmsr_cmd)
         assert stderr == "", f"Failed to get MSR for {index=:#x}: {code=}"
         msrs_dict[index] = int(stdout, 16)
 
@@ -235,7 +272,9 @@ def get_guest_msrs(microvm, msr_index_list):
     ),
 )
 def test_cpu_config_dump_vs_actual(
-    uvm_legacy,
+    microvm_factory,
+    guest_kernel,
+    rootfs,
     cpu_template_helper,
     tmp_path,
 ):
@@ -243,7 +282,7 @@ def test_cpu_config_dump_vs_actual(
     Verify that the dumped CPU config matches the actual CPU config inside
     guest.
     """
-    microvm = uvm_legacy
+    microvm = microvm_factory.build(guest_kernel, rootfs)
     microvm.spawn()
     microvm.basic_config()
     microvm.add_net_iface()
@@ -309,7 +348,7 @@ def test_cpu_config_dump_vs_actual(
         ), f"Mismatched MSR for {key:#010x}: {actual=:#066b} vs. {dump=:#066b}"
 
 
-def detect_fingerprint_change(microvm, tmp_path, cpu_template_helper, filters):
+def detect_fingerprint_change(microvm, tmp_path, cpu_template_helper, filters=None):
     """
     Compare fingerprint files with filters between one taken at the moment and
     a baseline file taken in a specific point in time.
@@ -365,25 +404,19 @@ def test_guest_cpu_config_change(test_microvm_with_api, tmp_path, cpu_template_h
 
 
 @pytest.mark.nonci
-def test_host_fingerprint_change(test_microvm_with_api, tmp_path, cpu_template_helper):
+def test_fingerprint_change(test_microvm_with_api, tmp_path, cpu_template_helper):
     """
-    Verify that the host fingerprint has not changed since the baseline
-    fingerprint was gathered.
+    Verify that all the fields of the fingerprint has not changed since the
+    baseline fingerprint was gathered.
     """
     detect_fingerprint_change(
         test_microvm_with_api,
         tmp_path,
         cpu_template_helper,
-        [
-            "kernel_version",
-            "microcode_version",
-            "bios_version",
-            "bios_revision",
-        ],
     )
 
 
-@skip_on_arm
+@nonci_on_arm
 def test_json_static_templates(
     test_microvm_with_api, cpu_template_helper, tmp_path, custom_cpu_template
 ):
@@ -426,9 +459,14 @@ def test_consecutive_cpu_config_consistency(
     if PLATFORM == "x86_64":
         empty_cpu_config = {
             "cpuid_modifiers": [],
+            "kvm_capabilities": [],
             "msr_modifiers": [],
         }
     elif PLATFORM == "aarch64":
-        empty_cpu_config = {"reg_modifiers": []}
+        empty_cpu_config = {
+            "kvm_capabilities": [],
+            "reg_modifiers": [],
+            "vcpu_features": [],
+        }
     assert json.loads(cpu_config_1.read_text(encoding="utf-8")) == empty_cpu_config
     assert json.loads(cpu_config_2.read_text(encoding="utf-8")) == empty_cpu_config

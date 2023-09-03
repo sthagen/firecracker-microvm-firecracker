@@ -4,6 +4,19 @@
 
 ### Added
 
+- [#4045](https://github.com/firecracker-microvm/firecracker/pull/4045)
+  and [#4075](https://github.com/firecracker-microvm/firecracker/pull/4075):
+  Added `snapshot-editor` tool for modifications of snapshot files.
+  It allows for rebasing of memory snapshot files, printing and
+  removing aarch64 registers from the vmstate and obtaining snapshot version.
+- [#3967](https://github.com/firecracker-microvm/firecracker/pull/3967/):
+  Added new fields to the custom CPU templates. (aarch64 only) `vcpu_features`
+  field allows modifications of vCPU features enabled during vCPU
+  initialization. `kvm_capabilities` field allows modifications of KVM
+  capability checks that Firecracker performs during boot. If any of
+  these fields are in use, minimal target snapshot version is
+  restricted to 1.5.
+
 ### Changed
 
 - Updated deserialization of `bitmap` for custom CPU templates to allow usage
@@ -12,6 +25,15 @@
 - Better logs during validation of CPU ID in snapshot restoration path. Also
   Firecracker now does not fail if it can't get CPU ID from the host or
   can't find CPU ID in the snapshot.
+- Changed the serial device to only try to initialize itself if stdin is a terminal
+  or a FIFO pipe. This fixes logged warnings about the serial device failing to
+  initialize if the process is daemonized (in which case stdin is /dev/null instead
+  of a terminal).
+- Changed to show a warning message when launching a microVM with C3 template on
+  a processor prior to Intel Cascade Lake, because the guest kernel does not
+  apply the mitigation against MMIO stale data vulnerability when it is running
+  on a processor that does not enumerate FBSDP_NO, PSDP_NO and SBDR_SSDP_NO on
+  IA32_ARCH_CAPABILITIES MSR.
 
 ### Fixed
 
@@ -21,6 +43,16 @@
   and the FXSR bit (CPUID.80000001h:EDX[24]).
 - Fixed the T2A CPU template to set the RstrFpErrPtrs bit
   (CPUID.80000008h:EBX[2]).
+- Fixed a bug where Firecracker would crash during boot if a guest set up a virtio
+  queue that partially overlapped with the MMIO gap. Now Firecracker instead
+  correctly refuses to activate the corresponding virtio device.
+- Fixed the T2CL CPU template to pass through security mitigation bits that are
+  listed by KVM as bits able to be passed through. By making the most use of the
+  available hardware security mitigations on a processor that a guest is running
+  on, the guest might be able to benefit from performance improvements.
+- Fixed the T2S CPU template to set the GDS_NO bit of the IA32_ARCH_CAPABILITIES
+  MSR to 1 in accordance with an Intel microcode update. To use the template
+  securely, users should apply the latest microcode update on the host.
 
 ## [1.4.0]
 
