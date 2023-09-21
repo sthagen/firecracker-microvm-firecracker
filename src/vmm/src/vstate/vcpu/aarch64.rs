@@ -5,6 +5,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
+use kvm_bindings::*;
 use kvm_ioctls::*;
 use logger::{error, IncMetric, METRICS};
 use utils::vm_memory::{Address, GuestAddress, GuestMemoryMmap};
@@ -12,7 +13,8 @@ use versionize::{VersionMap, Versionize, VersionizeError, VersionizeResult};
 use versionize_derive::Versionize;
 
 use crate::arch::aarch64::regs::{
-    Aarch64RegisterOld, Aarch64RegisterRef, Aarch64RegisterVec, KVM_REG_ARM_TIMER_CNT,
+    arm64_core_reg_id, offset__of, Aarch64RegisterOld, Aarch64RegisterRef, Aarch64RegisterVec,
+    KVM_REG_ARM_TIMER_CNT,
 };
 use crate::arch::aarch64::vcpu::{
     get_all_registers, get_all_registers_ids, get_mpidr, get_mpstate, get_registers, set_mpstate,
@@ -25,31 +27,23 @@ use crate::vstate::vcpu::VcpuEmulation;
 use crate::vstate::vm::Vm;
 
 /// Errors associated with the wrappers over KVM ioctls.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
 pub enum KvmVcpuError {
-    /// Error configuring the vcpu registers.
-    #[error("Error configuring the vcpu registers: {0}")]
+    /// Error configuring the vcpu registers: {0}
     ConfigureRegisters(ArchError),
-    /// Error creating vcpu.
-    #[error("Error creating vcpu: {0}")]
+    /// Error creating vcpu: {0}
     CreateVcpu(kvm_ioctls::Error),
-    /// Failed to dump CPU configuration.
-    #[error("Failed to dump CPU configuration: {0}")]
+    /// Failed to dump CPU configuration: {0}
     DumpCpuConfig(ArchError),
-    /// Error getting the vcpu preferred target.
-    #[error("Error getting the vcpu preferred target: {0}")]
+    /// Error getting the vcpu preferred target: {0}
     GetPreferredTarget(kvm_ioctls::Error),
-    /// Error initializing the vcpu.
-    #[error("Error initializing the vcpu: {0}")]
+    /// Error initializing the vcpu: {0}
     Init(kvm_ioctls::Error),
-    /// Error applying template.
-    #[error("Error applying template: {0}")]
+    /// Error applying template: {0}
     ApplyCpuTemplate(ArchError),
-    /// Failed to restore the state of the vcpu.
-    #[error("Failed to restore the state of the vcpu: {0}")]
+    /// Failed to restore the state of the vcpu: {0}
     RestoreState(ArchError),
-    /// Failed to save the state of the vcpu.
-    #[error("Failed to save the state of the vcpu: {0}")]
+    /// Failed to save the state of the vcpu: {0}
     SaveState(ArchError),
 }
 
@@ -208,11 +202,20 @@ impl KvmVcpu {
     pub fn dump_cpu_config(&self) -> Result<CpuConfiguration, KvmVcpuError> {
         let mut reg_list = get_all_registers_ids(&self.fd).map_err(KvmVcpuError::DumpCpuConfig)?;
 
+        let kvm_reg_pc = {
+            let kreg_off = offset__of!(kvm_regs, regs);
+            let pc_off = offset__of!(user_pt_regs, pc) + kreg_off;
+            arm64_core_reg_id!(KVM_REG_SIZE_U64, pc_off)
+        };
+
         // KVM_REG_ARM_TIMER_CNT should be removed, because it depends on the elapsed time and
         // the dumped CPU config is used to create custom CPU templates to modify CPU features
         // exposed to guests or ot detect CPU configuration changes caused by firecracker/KVM/
         // BIOS.
-        reg_list.retain(|&reg_id| reg_id != KVM_REG_ARM_TIMER_CNT);
+        // The value of program counter (PC) is determined by the given kernel image. It should not
+        // be overwritten by a custom CPU template and does not need to be tracked in a fingerprint
+        // file.
+        reg_list.retain(|&reg_id| reg_id != KVM_REG_ARM_TIMER_CNT && reg_id != kvm_reg_pc);
 
         let mut regs = Aarch64RegisterVec::default();
         get_registers(&self.fd, &reg_list, &mut regs).map_err(KvmVcpuError::DumpCpuConfig)?;
