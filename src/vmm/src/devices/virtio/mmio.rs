@@ -9,11 +9,11 @@ use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use log::warn;
 use utils::byte_order;
 use utils::vm_memory::{GuestAddress, GuestMemoryMmap};
 
 use super::{device_status, *};
+use crate::logger::warn;
 
 // TODO crosvm uses 0 here, but IIRC virtio specified some other vendor id that should be used
 const VENDOR_ID: u32 = 0;
@@ -146,9 +146,8 @@ impl MmioTransport {
         self.queue_select = 0;
         self.interrupt_status.store(0, Ordering::SeqCst);
         self.device_status = device_status::INIT;
-        // . Keep interrupt_evt and queue_evts as is. There may be pending
-        //   notifications in those eventfds, but nothing will happen other
-        //   than supurious wakeups.
+        // . Keep interrupt_evt and queue_evts as is. There may be pending notifications in those
+        //   eventfds, but nothing will happen other than supurious wakeups.
         // . Do not reset config_generation and keep it monotonically increasing
         for queue in self.locked_device().queues_mut() {
             *queue = Queue::new(queue.get_max_size());

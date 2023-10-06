@@ -17,7 +17,6 @@ use linux_loader::loader::elf::Elf as Loader;
 #[cfg(target_arch = "aarch64")]
 use linux_loader::loader::pe::PE as Loader;
 use linux_loader::loader::KernelLoader;
-use log::error;
 use seccompiler::BpfThreadMap;
 use snapshot::Persist;
 use userfaultfd::Uffd;
@@ -49,6 +48,7 @@ use crate::devices::virtio::{
 use crate::devices::BusDevice;
 #[cfg(target_arch = "aarch64")]
 use crate::logger;
+use crate::logger::error;
 use crate::persist::{MicrovmState, MicrovmStateError};
 use crate::resources::VmResources;
 use crate::vmm_config::boot_source::BootConfig;
@@ -1025,13 +1025,12 @@ pub mod tests {
     fn cmdline_contains(cmdline: &Cmdline, slug: &str) -> bool {
         // The following unwraps can never fail; the only way any of these methods
         // would return an `Err` is if one of the following conditions is met:
-        //    1. The command line is empty: We just added things to it, and if insertion
-        //       of an argument goes wrong, then `Cmdline::insert` would have already
-        //       returned `Err`.
+        //    1. The command line is empty: We just added things to it, and if insertion of an
+        //       argument goes wrong, then `Cmdline::insert` would have already returned `Err`.
         //    2. There's a spurious null character somewhere in the command line: The
         //       `Cmdline::insert` methods verify that this is not the case.
-        //    3. The `CString` is not valid UTF8: It just got created from a `String`,
-        //       which was valid UTF8.
+        //    3. The `CString` is not valid UTF8: It just got created from a `String`, which was
+        //       valid UTF8.
 
         cmdline
             .as_cstring()
