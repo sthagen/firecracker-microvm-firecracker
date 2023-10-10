@@ -65,7 +65,7 @@ pub enum MptableError {
 // With APIC/xAPIC, there are only 255 APIC IDs available. And IOAPIC occupies
 // one APIC ID, so only 254 CPUs at maximum may be supported. Actually it's
 // a large number for FC usecases.
-pub const MAX_SUPPORTED_CPUS: u32 = 254;
+pub const MAX_SUPPORTED_CPUS: u8 = 254;
 
 // Convenience macro for making arrays of diverse character types.
 macro_rules! char_array {
@@ -111,7 +111,7 @@ fn compute_mp_size(num_cpus: u8) -> usize {
 
 /// Performs setup of the MP table for the given `num_cpus`.
 pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<(), MptableError> {
-    if u32::from(num_cpus) > MAX_SUPPORTED_CPUS {
+    if num_cpus > MAX_SUPPORTED_CPUS {
         return Err(MptableError::TooManyCpus);
     }
 
@@ -140,7 +140,7 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<(), MptableE
         let size = mem::size_of::<mpspec::mpf_intel>() as u64;
         let mut mpf_intel = mpspec::mpf_intel {
             signature: SMP_MAGIC_IDENT,
-            physptr: (base_mp.raw_value() + size) as u32,
+            physptr: u32::try_from(base_mp.raw_value() + size).unwrap(),
             length: 1,
             specification: 4,
             ..mpspec::mpf_intel::default()
@@ -160,12 +160,12 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<(), MptableE
         let size = mem::size_of::<mpspec::mpc_cpu>() as u64;
         for cpu_id in 0..num_cpus {
             let mpc_cpu = mpspec::mpc_cpu {
-                type_: mpspec::MP_PROCESSOR as u8,
+                type_: mpspec::MP_PROCESSOR.try_into().unwrap(),
                 apicid: cpu_id,
                 apicver: APIC_VERSION,
-                cpuflag: mpspec::CPU_ENABLED as u8
+                cpuflag: u8::try_from(mpspec::CPU_ENABLED).unwrap()
                     | if cpu_id == 0 {
-                        mpspec::CPU_BOOTPROCESSOR as u8
+                        u8::try_from(mpspec::CPU_BOOTPROCESSOR).unwrap()
                     } else {
                         0
                     },
@@ -182,7 +182,7 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<(), MptableE
     {
         let size = mem::size_of::<mpspec::mpc_bus>() as u64;
         let mpc_bus = mpspec::mpc_bus {
-            type_: mpspec::MP_BUS as u8,
+            type_: mpspec::MP_BUS.try_into().unwrap(),
             busid: 0,
             bustype: BUS_TYPE_ISA,
         };
@@ -194,10 +194,10 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<(), MptableE
     {
         let size = mem::size_of::<mpspec::mpc_ioapic>() as u64;
         let mpc_ioapic = mpspec::mpc_ioapic {
-            type_: mpspec::MP_IOAPIC as u8,
+            type_: mpspec::MP_IOAPIC.try_into().unwrap(),
             apicid: ioapicid,
             apicver: APIC_VERSION,
-            flags: mpspec::MPC_APIC_USABLE as u8,
+            flags: mpspec::MPC_APIC_USABLE.try_into().unwrap(),
             apicaddr: IO_APIC_DEFAULT_PHYS_BASE,
         };
         mem.write_obj(mpc_ioapic, base_mp)
@@ -209,9 +209,9 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<(), MptableE
     for i in 0..=u8::try_from(IRQ_MAX).map_err(|_| MptableError::TooManyIrqs)? {
         let size = mem::size_of::<mpspec::mpc_intsrc>() as u64;
         let mpc_intsrc = mpspec::mpc_intsrc {
-            type_: mpspec::MP_INTSRC as u8,
-            irqtype: mpspec::mp_irq_source_types_mp_INT as u8,
-            irqflag: mpspec::MP_IRQPOL_DEFAULT as u16,
+            type_: mpspec::MP_INTSRC.try_into().unwrap(),
+            irqtype: mpspec::mp_irq_source_types_mp_INT.try_into().unwrap(),
+            irqflag: mpspec::MP_IRQPOL_DEFAULT.try_into().unwrap(),
             srcbus: 0,
             srcbusirq: i,
             dstapic: ioapicid,
@@ -225,9 +225,9 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<(), MptableE
     {
         let size = mem::size_of::<mpspec::mpc_lintsrc>() as u64;
         let mpc_lintsrc = mpspec::mpc_lintsrc {
-            type_: mpspec::MP_LINTSRC as u8,
-            irqtype: mpspec::mp_irq_source_types_mp_ExtINT as u8,
-            irqflag: mpspec::MP_IRQPOL_DEFAULT as u16,
+            type_: mpspec::MP_LINTSRC.try_into().unwrap(),
+            irqtype: mpspec::mp_irq_source_types_mp_ExtINT.try_into().unwrap(),
+            irqflag: mpspec::MP_IRQPOL_DEFAULT.try_into().unwrap(),
             srcbusid: 0,
             srcbusirq: 0,
             destapic: 0,
@@ -241,9 +241,9 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<(), MptableE
     {
         let size = mem::size_of::<mpspec::mpc_lintsrc>() as u64;
         let mpc_lintsrc = mpspec::mpc_lintsrc {
-            type_: mpspec::MP_LINTSRC as u8,
-            irqtype: mpspec::mp_irq_source_types_mp_NMI as u8,
-            irqflag: mpspec::MP_IRQPOL_DEFAULT as u16,
+            type_: mpspec::MP_LINTSRC.try_into().unwrap(),
+            irqtype: mpspec::mp_irq_source_types_mp_NMI.try_into().unwrap(),
+            irqflag: mpspec::MP_IRQPOL_DEFAULT.try_into().unwrap(),
             srcbusid: 0,
             srcbusirq: 0,
             destapic: 0xFF,
@@ -263,7 +263,10 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<(), MptableE
             signature: MPC_SIGNATURE,
             // it's safe to use unchecked_offset_from because
             // table_end > table_base
-            length: table_end.unchecked_offset_from(table_base) as u16,
+            length: table_end
+                .unchecked_offset_from(table_base)
+                .try_into()
+                .unwrap(),
             spec: MPC_SPEC,
             oem: MPC_OEM,
             productid: MPC_PRODUCT_ID,
@@ -378,13 +381,13 @@ mod tests {
         let mem = utils::vm_memory::test_utils::create_guest_memory_unguarded(
             &[(
                 GuestAddress(MPTABLE_START),
-                compute_mp_size(MAX_SUPPORTED_CPUS as u8),
+                compute_mp_size(MAX_SUPPORTED_CPUS),
             )],
             false,
         )
         .unwrap();
 
-        for i in 0..MAX_SUPPORTED_CPUS as u8 {
+        for i in 0..MAX_SUPPORTED_CPUS {
             setup_mptable(&mem, i).unwrap();
 
             let mpf_intel: mpspec::mpf_intel = mem.read_obj(GuestAddress(MPTABLE_START)).unwrap();
@@ -414,12 +417,12 @@ mod tests {
     fn cpu_entry_count_max() {
         let cpus = MAX_SUPPORTED_CPUS + 1;
         let mem = utils::vm_memory::test_utils::create_guest_memory_unguarded(
-            &[(GuestAddress(MPTABLE_START), compute_mp_size(cpus as u8))],
+            &[(GuestAddress(MPTABLE_START), compute_mp_size(cpus))],
             false,
         )
         .unwrap();
 
-        let result = setup_mptable(&mem, cpus as u8).unwrap_err();
+        let result = setup_mptable(&mem, cpus).unwrap_err();
         assert_eq!(result, MptableError::TooManyCpus);
     }
 }

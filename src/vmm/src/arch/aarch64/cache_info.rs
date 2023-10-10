@@ -37,7 +37,7 @@ pub(crate) struct CacheEntry {
     pub level: u8,
     // Type of cache: Unified, Data, Instruction.
     pub type_: CacheType,
-    pub size_: Option<usize>,
+    pub size_: Option<u32>,
     pub number_of_sets: Option<u16>,
     pub line_size: Option<u16>,
     // How many CPUS share this cache.
@@ -211,12 +211,12 @@ fn readln_special<T: AsRef<Path>>(file_path: &T) -> Result<String, CacheInfoErro
     Ok(line.trim_end().to_string())
 }
 
-fn to_bytes(cache_size_pretty: &mut String) -> Result<usize, CacheInfoError> {
+fn to_bytes(cache_size_pretty: &mut String) -> Result<u32, CacheInfoError> {
     match cache_size_pretty.pop() {
-        Some('K') => Ok(cache_size_pretty.parse::<usize>().map_err(|err| {
+        Some('K') => Ok(cache_size_pretty.parse::<u32>().map_err(|err| {
             CacheInfoError::InvalidCacheAttr("size".to_string(), err.to_string())
         })? * 1024),
-        Some('M') => Ok(cache_size_pretty.parse::<usize>().map_err(|err| {
+        Some('M') => Ok(cache_size_pretty.parse::<u32>().map_err(|err| {
             CacheInfoError::InvalidCacheAttr("size".to_string(), err.to_string())
         })? * 1024
             * 1024),
@@ -248,11 +248,14 @@ fn mask_str2bit_count(mask_str: &str) -> Result<u16, CacheInfoError> {
         if s_zero_free.is_empty() {
             s_zero_free = "0";
         }
-        bit_count += u32::from_str_radix(s_zero_free, 16)
-            .map_err(|err| {
-                CacheInfoError::InvalidCacheAttr("shared_cpu_map".to_string(), err.to_string())
-            })?
-            .count_ones() as u16;
+        bit_count += u16::try_from(
+            u32::from_str_radix(s_zero_free, 16)
+                .map_err(|err| {
+                    CacheInfoError::InvalidCacheAttr("shared_cpu_map".to_string(), err.to_string())
+                })?
+                .count_ones(),
+        )
+        .unwrap(); // Safe because this is at most 32
     }
     if bit_count == 0 {
         return Err(CacheInfoError::InvalidCacheAttr(

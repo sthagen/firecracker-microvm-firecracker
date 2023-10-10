@@ -20,7 +20,7 @@ use std::fmt::Debug;
 /// - a TX queue FD;
 /// - an event queue FD; and
 /// - a backend FD.
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 use log::{debug, error, warn};
@@ -154,7 +154,7 @@ where
                             // This addition cannot overflow, because packet length
                             // is previously validated against `MAX_PKT_BUF_SIZE`
                             // bound as part of `commit_hdr()`.
-                            Ok(()) => VSOCK_PKT_HDR_SIZE as u32 + pkt.len(),
+                            Ok(()) => VSOCK_PKT_HDR_SIZE + pkt.len(),
                             Err(err) => {
                                 warn!(
                                     "vsock: Error writing packet header to guest memory: \
@@ -293,7 +293,7 @@ where
         &self.irq_trigger.irq_evt
     }
 
-    fn interrupt_status(&self) -> Arc<AtomicUsize> {
+    fn interrupt_status(&self) -> Arc<AtomicU32> {
         self.irq_trigger.irq_status.clone()
     }
 

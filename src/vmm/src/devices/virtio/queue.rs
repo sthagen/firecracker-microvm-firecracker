@@ -238,7 +238,7 @@ impl Queue {
 
     /// Validates the queue's in-memory layout is correct.
     pub fn is_layout_valid(&self, mem: &GuestMemoryMmap) -> bool {
-        let queue_size = u64::from(self.actual_size());
+        let queue_size = usize::from(self.actual_size());
         let desc_table = self.desc_table;
         let desc_table_size = 16 * queue_size;
         let avail_ring = self.avail_ring;
@@ -263,21 +263,21 @@ impl Queue {
             error!("virtio queue used ring breaks alignment constraints");
             false
         // range check entire descriptor table to be assigned valid guest physical addresses
-        } else if mem.get_slice(desc_table, desc_table_size as usize).is_err() {
+        } else if mem.get_slice(desc_table, desc_table_size).is_err() {
             error!(
                 "virtio queue descriptor table goes out of bounds: start:0x{:08x} size:0x{:08x}",
                 desc_table.raw_value(),
                 desc_table_size
             );
             false
-        } else if mem.get_slice(avail_ring, avail_ring_size as usize).is_err() {
+        } else if mem.get_slice(avail_ring, avail_ring_size).is_err() {
             error!(
                 "virtio queue available ring goes out of bounds: start:0x{:08x} size:0x{:08x}",
                 avail_ring.raw_value(),
                 avail_ring_size
             );
             false
-        } else if mem.get_slice(used_ring, used_ring_size as usize).is_err() {
+        } else if mem.get_slice(used_ring, used_ring_size).is_err() {
             error!(
                 "virtio queue used ring goes out of bounds: start:0x{:08x} size:0x{:08x}",
                 used_ring.raw_value(),
@@ -1132,12 +1132,7 @@ mod tests {
         // Let's create two simple descriptor chains.
 
         for j in 0..5 {
-            vq.dtable[j].set(
-                0x1000 * (j + 1) as u64,
-                0x1000,
-                VIRTQ_DESC_F_NEXT,
-                (j + 1) as u16,
-            );
+            vq.dtable[j as usize].set(0x1000 * u64::from(j + 1), 0x1000, VIRTQ_DESC_F_NEXT, j + 1);
         }
 
         // the chains are (0, 1) and (2, 3, 4)
@@ -1232,12 +1227,7 @@ mod tests {
         let mut q = vq.create_queue();
 
         for j in 0..4 {
-            vq.dtable[j].set(
-                0x1000 * (j + 1) as u64,
-                0x1000,
-                VIRTQ_DESC_F_NEXT,
-                (j + 1) as u16,
-            );
+            vq.dtable[j as usize].set(0x1000 * u64::from(j + 1), 0x1000, VIRTQ_DESC_F_NEXT, j + 1);
         }
 
         // Create 2 descriptor chains.
@@ -1285,12 +1275,7 @@ mod tests {
 
         // Create 1 descriptor chain of 4.
         for j in 0..4 {
-            vq.dtable[j].set(
-                0x1000 * (j + 1) as u64,
-                0x1000,
-                VIRTQ_DESC_F_NEXT,
-                (j + 1) as u16,
-            );
+            vq.dtable[j as usize].set(0x1000 * u64::from(j + 1), 0x1000, VIRTQ_DESC_F_NEXT, j + 1);
         }
         // We need to clear the VIRTQ_DESC_F_NEXT for the last descriptor.
         vq.dtable[3].flags.set(0);

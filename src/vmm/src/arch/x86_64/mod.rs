@@ -21,6 +21,7 @@ pub mod regs;
 use linux_loader::configurator::linux::LinuxBootConfigurator;
 use linux_loader::configurator::{BootConfigurator, BootParams};
 use linux_loader::loader::bootparam::boot_params;
+use utils::u64_to_usize;
 use utils::vm_memory::{Address, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 
 use crate::arch::InitrdConfig;
@@ -65,12 +66,12 @@ pub const MMIO_MEM_SIZE: u64 = MEM_32BIT_GAP_SIZE;
 pub fn arch_memory_regions(size: usize) -> Vec<(GuestAddress, usize)> {
     // It's safe to cast MMIO_MEM_START to usize because it fits in a u32 variable
     // (It points to an address in the 32 bit space).
-    match size.checked_sub(MMIO_MEM_START as usize) {
+    match size.checked_sub(usize::try_from(MMIO_MEM_START).unwrap()) {
         // case1: guest memory fits before the gap
         None | Some(0) => vec![(GuestAddress(0), size)],
         // case2: guest memory extends beyond the gap
         Some(remaining) => vec![
-            (GuestAddress(0), MMIO_MEM_START as usize),
+            (GuestAddress(0), usize::try_from(MMIO_MEM_START).unwrap()),
             (GuestAddress(FIRST_ADDR_PAST_32BITS), remaining),
         ],
     }
@@ -89,8 +90,7 @@ pub fn initrd_load_addr(
     let first_region = guest_mem
         .find_region(GuestAddress::new(0))
         .ok_or(ConfigurationError::InitrdAddress)?;
-    // It's safe to cast to usize because the size of a region can't be greater than usize.
-    let lowmem_size = first_region.len() as usize;
+    let lowmem_size = u64_to_usize(first_region.len());
 
     if lowmem_size < initrd_size {
         return Err(ConfigurationError::InitrdAddress);
@@ -133,12 +133,12 @@ pub fn configure_system(
     params.hdr.type_of_loader = KERNEL_LOADER_OTHER;
     params.hdr.boot_flag = KERNEL_BOOT_FLAG_MAGIC;
     params.hdr.header = KERNEL_HDR_MAGIC;
-    params.hdr.cmd_line_ptr = cmdline_addr.raw_value() as u32;
-    params.hdr.cmdline_size = cmdline_size as u32;
+    params.hdr.cmd_line_ptr = u32::try_from(cmdline_addr.raw_value()).unwrap();
+    params.hdr.cmdline_size = u32::try_from(cmdline_size).unwrap();
     params.hdr.kernel_alignment = KERNEL_MIN_ALIGNMENT_BYTES;
     if let Some(initrd_config) = initrd {
-        params.hdr.ramdisk_image = initrd_config.address.raw_value() as u32;
-        params.hdr.ramdisk_size = initrd_config.size as u32;
+        params.hdr.ramdisk_image = u32::try_from(initrd_config.address.raw_value()).unwrap();
+        params.hdr.ramdisk_size = u32::try_from(initrd_config.size).unwrap();
     }
 
     add_e820_entry(&mut params, 0, EBDA_START, E820_RAM)?;
@@ -191,7 +191,7 @@ fn add_e820_entry(
     size: u64,
     mem_type: u32,
 ) -> Result<(), ConfigurationError> {
-    if params.e820_entries >= params.e820_table.len() as u8 {
+    if params.e820_entries as usize >= params.e820_table.len() {
         return Err(ConfigurationError::E820Configuration);
     }
 
@@ -292,7 +292,7 @@ mod tests {
 
         // Exercise the scenario where the field storing the length of the e820 entry table is
         // is bigger than the allocated memory.
-        params.e820_entries = params.e820_table.len() as u8 + 1;
+        params.e820_entries = u8::try_from(params.e820_table.len()).unwrap() + 1;
         assert!(add_e820_entry(
             &mut params,
             e820_map[0].addr,

@@ -4,7 +4,7 @@
 //! Defines the structures needed for saving/restoring net devices.
 
 use std::io;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 
 use log::warn;
@@ -30,7 +30,7 @@ use crate::rate_limiter::RateLimiter;
 // NOTICE: Any changes to this structure require a snapshot version bump.
 pub struct NetConfigSpaceState {
     #[version(end = 2, default_fn = "def_guest_mac_old")]
-    guest_mac: [u8; MAC_ADDR_LEN],
+    guest_mac: [u8; MAC_ADDR_LEN as usize],
     #[version(start = 2, de_fn = "de_guest_mac_v2", ser_fn = "ser_guest_mac_v2")]
     guest_mac_v2: Option<MacAddr>,
 }
@@ -55,7 +55,7 @@ impl NetConfigSpaceState {
         Ok(())
     }
 
-    fn def_guest_mac_old(_: u16) -> [u8; MAC_ADDR_LEN] {
+    fn def_guest_mac_old(_: u16) -> [u8; MAC_ADDR_LEN as usize] {
         // v1.2 and newer don't use this field anyway
         Default::default()
     }
@@ -156,8 +156,7 @@ impl Persist<'_> for Net {
             NET_NUM_QUEUES,
             FIRECRACKER_MAX_QUEUE_SIZE,
         )?;
-        net.irq_trigger.irq_status =
-            Arc::new(AtomicUsize::new(state.virtio_state.interrupt_status));
+        net.irq_trigger.irq_status = Arc::new(AtomicU32::new(state.virtio_state.interrupt_status));
         net.avail_features = state.virtio_state.avail_features;
         net.acked_features = state.virtio_state.acked_features;
 

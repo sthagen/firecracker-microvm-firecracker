@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 use aws_lc_rs::rand;
@@ -164,7 +164,7 @@ impl Entropy {
             match self.queues[RNG_QUEUE].add_used(mem, index, bytes) {
                 Ok(_) => {
                     used_any = true;
-                    METRICS.entropy.entropy_bytes.add(bytes as usize);
+                    METRICS.entropy.entropy_bytes.add(bytes.into());
                 }
                 Err(err) => {
                     error!("entropy: Could not add used descriptor to queue: {err}");
@@ -228,8 +228,8 @@ impl Entropy {
         self.acked_features = features;
     }
 
-    pub(crate) fn set_irq_status(&mut self, status: usize) {
-        self.irq_trigger.irq_status = Arc::new(AtomicUsize::new(status));
+    pub(crate) fn set_irq_status(&mut self, status: u32) {
+        self.irq_trigger.irq_status = Arc::new(AtomicU32::new(status));
     }
 
     pub(crate) fn set_activated(&mut self, mem: GuestMemoryMmap) {
@@ -262,7 +262,7 @@ impl VirtioDevice for Entropy {
         &self.irq_trigger.irq_evt
     }
 
-    fn interrupt_status(&self) -> Arc<AtomicUsize> {
+    fn interrupt_status(&self) -> Arc<AtomicU32> {
         self.irq_trigger.irq_status.clone()
     }
 
@@ -391,7 +391,10 @@ mod tests {
 
         let features = 1 << VIRTIO_F_VERSION_1;
 
-        assert_eq!(entropy_dev.avail_features_by_page(0), features as u32);
+        assert_eq!(
+            entropy_dev.avail_features_by_page(0),
+            (features & 0xFFFFFFFF) as u32,
+        );
         assert_eq!(
             entropy_dev.avail_features_by_page(1),
             (features >> 32) as u32

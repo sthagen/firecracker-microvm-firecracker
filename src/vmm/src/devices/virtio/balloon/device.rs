@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io::Write;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{cmp, fmt};
@@ -11,6 +11,7 @@ use log::error;
 use serde::Serialize;
 use timerfd::{ClockId, SetTimeFlags, TimerFd, TimerState};
 use utils::eventfd::EventFd;
+use utils::u64_to_usize;
 use utils::vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryMmap};
 use virtio_gen::virtio_blk::VIRTIO_F_VERSION_1;
 
@@ -585,7 +586,7 @@ impl VirtioDevice for Balloon {
         &self.irq_trigger.irq_evt
     }
 
-    fn interrupt_status(&self) -> Arc<AtomicUsize> {
+    fn interrupt_status(&self) -> Arc<AtomicU32> {
         self.irq_trigger.irq_status.clone()
     }
 
@@ -600,7 +601,7 @@ impl VirtioDevice for Balloon {
         if let Some(end) = offset.checked_add(data.len() as u64) {
             // This write can't fail, offset and end are checked against config_len.
             data.write_all(
-                &config_space_bytes[offset as usize..cmp::min(end, config_len) as usize],
+                &config_space_bytes[u64_to_usize(offset)..u64_to_usize(cmp::min(end, config_len))],
             )
             .unwrap();
         }
@@ -749,7 +750,10 @@ pub(crate) mod tests {
                     | (u64::from(*deflate_on_oom) << VIRTIO_BALLOON_F_DEFLATE_ON_OOM)
                     | ((u64::from(*stats_interval)) << VIRTIO_BALLOON_F_STATS_VQ);
 
-                assert_eq!(balloon.avail_features_by_page(0), features as u32);
+                assert_eq!(
+                    balloon.avail_features_by_page(0),
+                    (features & 0xFFFFFFFF) as u32
+                );
                 assert_eq!(balloon.avail_features_by_page(1), (features >> 32) as u32);
                 for i in 2..10 {
                     assert_eq!(balloon.avail_features_by_page(i), 0u32);
@@ -849,7 +853,7 @@ pub(crate) mod tests {
                 &infq,
                 0,
                 page_addr,
-                SIZE_OF_U32 as u32,
+                SIZE_OF_U32.try_into().unwrap(),
                 VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
             );
 
@@ -869,7 +873,7 @@ pub(crate) mod tests {
                 &infq,
                 1,
                 page_addr,
-                SIZE_OF_U32 as u32 + 1,
+                u32::try_from(SIZE_OF_U32).unwrap() + 1,
                 VIRTQ_DESC_F_NEXT,
             );
 
@@ -904,7 +908,13 @@ pub(crate) mod tests {
         // to trigger the inflate event queue.
         {
             mem.write_obj::<u32>(0x1, GuestAddress(page_addr)).unwrap();
-            set_request(&infq, 0, page_addr, SIZE_OF_U32 as u32, VIRTQ_DESC_F_NEXT);
+            set_request(
+                &infq,
+                0,
+                page_addr,
+                SIZE_OF_U32.try_into().unwrap(),
+                VIRTQ_DESC_F_NEXT,
+            );
 
             check_metric_after_block!(
                 METRICS.balloon.event_fails,
@@ -925,7 +935,13 @@ pub(crate) mod tests {
         // Test the happy case.
         {
             mem.write_obj::<u32>(0x1, GuestAddress(page_addr)).unwrap();
-            set_request(&infq, 0, page_addr, SIZE_OF_U32 as u32, VIRTQ_DESC_F_NEXT);
+            set_request(
+                &infq,
+                0,
+                page_addr,
+                SIZE_OF_U32.try_into().unwrap(),
+                VIRTQ_DESC_F_NEXT,
+            );
 
             check_metric_after_block!(
                 METRICS.balloon.inflate_count,
@@ -953,7 +969,13 @@ pub(crate) mod tests {
 
         // Error case: forgot to trigger deflate event queue.
         {
-            set_request(&defq, 0, page_addr, SIZE_OF_U32 as u32, VIRTQ_DESC_F_NEXT);
+            set_request(
+                &defq,
+                0,
+                page_addr,
+                SIZE_OF_U32.try_into().unwrap(),
+                VIRTQ_DESC_F_NEXT,
+            );
             check_metric_after_block!(
                 METRICS.balloon.event_fails,
                 1,
@@ -967,7 +989,13 @@ pub(crate) mod tests {
 
         // Happy case.
         {
-            set_request(&defq, 1, page_addr, SIZE_OF_U32 as u32, VIRTQ_DESC_F_NEXT);
+            set_request(
+                &defq,
+                1,
+                page_addr,
+                SIZE_OF_U32.try_into().unwrap(),
+                VIRTQ_DESC_F_NEXT,
+            );
             check_metric_after_block!(
                 METRICS.balloon.deflate_count,
                 1,
@@ -989,7 +1017,13 @@ pub(crate) mod tests {
 
         // Error case: forgot to trigger stats event queue.
         {
-            set_request(&statsq, 0, 0x1000, SIZE_OF_STAT as u32, VIRTQ_DESC_F_NEXT);
+            set_request(
+                &statsq,
+                0,
+                0x1000,
+                SIZE_OF_STAT.try_into().unwrap(),
+                VIRTQ_DESC_F_NEXT,
+            );
             check_metric_after_block!(
                 METRICS.balloon.event_fails,
                 1,
@@ -1025,7 +1059,7 @@ pub(crate) mod tests {
                 &statsq,
                 0,
                 page_addr,
-                2 * SIZE_OF_STAT as u32,
+                2 * u32::try_from(SIZE_OF_STAT).unwrap(),
                 VIRTQ_DESC_F_NEXT,
             );
             check_metric_after_block!(METRICS.balloon.stats_updates_count, 1, {

@@ -7,7 +7,7 @@
 
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 use std::{cmp, mem};
 
@@ -15,6 +15,7 @@ use libc::EAGAIN;
 use log::{error, warn};
 use utils::eventfd::EventFd;
 use utils::net::mac::MacAddr;
+use utils::u64_to_usize;
 use utils::vm_memory::{ByteValued, Bytes, GuestMemoryError, GuestMemoryMmap};
 use virtio_gen::virtio_net::{
     virtio_net_hdr_v1, VIRTIO_F_VERSION_1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM,
@@ -355,7 +356,7 @@ impl Net {
 
             // If chunk is empty we are done here.
             if chunk.is_empty() {
-                METRICS.net.rx_bytes_count.add(data.len());
+                METRICS.net.rx_bytes_count.add(data.len() as u64);
                 METRICS.net.rx_packets_count.inc();
                 return Ok(());
             }
@@ -389,7 +390,8 @@ impl Net {
             METRICS.net.rx_fails.inc();
             0
         } else {
-            self.rx_bytes_read as u32
+            // Safe to unwrap because a frame must be smaller than 2^16 bytes.
+            u32::try_from(self.rx_bytes_read).unwrap()
         };
         queue.add_used(mem, head_index, used_len).map_err(|err| {
             error!("Failed to add available descriptor {}: {}", head_index, err);
@@ -474,7 +476,7 @@ impl Net {
 
         match Self::write_tap(tap, frame_iovec) {
             Ok(_) => {
-                METRICS.net.tx_bytes_count.add(frame_iovec.len());
+                METRICS.net.tx_bytes_count.add(frame_iovec.len() as u64);
                 METRICS.net.tx_packets_count.inc();
                 METRICS.net.tx_count.inc();
             }
@@ -494,7 +496,7 @@ impl Net {
             {
                 let len = len.get();
                 METRICS.mmds.tx_frames.inc();
-                METRICS.mmds.tx_bytes.add(len);
+                METRICS.mmds.tx_bytes.add(len as u64);
                 init_vnet_hdr(&mut self.rx_frame_buf);
                 return Ok(vnet_hdr_len() + len);
             }
@@ -787,7 +789,7 @@ impl VirtioDevice for Net {
         &self.irq_trigger.irq_evt
     }
 
-    fn interrupt_status(&self) -> Arc<AtomicUsize> {
+    fn interrupt_status(&self) -> Arc<AtomicU32> {
         self.irq_trigger.irq_status.clone()
     }
 
@@ -802,7 +804,7 @@ impl VirtioDevice for Net {
         if let Some(end) = offset.checked_add(data.len() as u64) {
             // This write can't fail, offset and end are checked against config_len.
             data.write_all(
-                &config_space_bytes[offset as usize..cmp::min(end, config_len) as usize],
+                &config_space_bytes[u64_to_usize(offset)..u64_to_usize(cmp::min(end, config_len))],
             )
             .unwrap();
         }
@@ -958,7 +960,10 @@ pub mod tests {
             | 1 << VIRTIO_F_VERSION_1
             | 1 << VIRTIO_RING_F_EVENT_IDX;
 
-        assert_eq!(net.avail_features_by_page(0), features as u32);
+        assert_eq!(
+            net.avail_features_by_page(0),
+            (features & 0xFFFFFFFF) as u32,
+        );
         assert_eq!(net.avail_features_by_page(1), (features >> 32) as u32);
         for i in 2..10 {
             assert_eq!(net.avail_features_by_page(i), 0u32);
@@ -978,13 +983,13 @@ pub mod tests {
 
         // Test `read_config()`. This also validates the MAC was properly configured.
         let mac = MacAddr::from_str("11:22:33:44:55:66").unwrap();
-        let mut config_mac = [0u8; MAC_ADDR_LEN];
+        let mut config_mac = [0u8; MAC_ADDR_LEN as usize];
         net.read_config(0, &mut config_mac);
         assert_eq!(&config_mac, mac.get_bytes());
 
         // Invalid read.
-        config_mac = [0u8; MAC_ADDR_LEN];
-        net.read_config(MAC_ADDR_LEN as u64, &mut config_mac);
+        config_mac = [0u8; MAC_ADDR_LEN as usize];
+        net.read_config(u64::from(MAC_ADDR_LEN), &mut config_mac);
         assert_eq!(config_mac, [0u8, 0u8, 0u8, 0u8, 0u8, 0u8]);
     }
 
@@ -993,9 +998,9 @@ pub mod tests {
         let mut net = default_net();
         set_mac(&mut net, MacAddr::from_str("11:22:33:44:55:66").unwrap());
 
-        let new_config: [u8; MAC_ADDR_LEN] = [0x66, 0x55, 0x44, 0x33, 0x22, 0x11];
+        let new_config: [u8; MAC_ADDR_LEN as usize] = [0x66, 0x55, 0x44, 0x33, 0x22, 0x11];
         net.write_config(0, &new_config);
-        let mut new_config_read = [0u8; MAC_ADDR_LEN];
+        let mut new_config_read = [0u8; MAC_ADDR_LEN as usize];
         net.read_config(0, &mut new_config_read);
         assert_eq!(new_config, new_config_read);
 
@@ -1015,14 +1020,14 @@ pub mod tests {
         // Invalid write.
         net.write_config(5, &new_config);
         // Verify old config was untouched.
-        new_config_read = [0u8; MAC_ADDR_LEN];
+        new_config_read = [0u8; MAC_ADDR_LEN as usize];
         net.read_config(0, &mut new_config_read);
         assert_eq!(new_config, new_config_read);
 
         // Large offset that may cause an overflow.
         net.write_config(u64::MAX, &new_config);
         // Verify old config was untouched.
-        new_config_read = [0u8; MAC_ADDR_LEN];
+        new_config_read = [0u8; MAC_ADDR_LEN as usize];
         net.read_config(0, &mut new_config_read);
         assert_eq!(new_config, new_config_read);
     }
@@ -1145,7 +1150,8 @@ pub mod tests {
         // Check that the frame wasn't deferred.
         assert!(!th.net().rx_deferred_frame);
         // Check that the frame has been written successfully to the valid Rx descriptor chain.
-        th.rxq.check_used_elem(3, 5, frame.len() as u32);
+        th.rxq
+            .check_used_elem(3, 5, frame.len().try_into().unwrap());
         th.rxq.dtable[5].check_data(&frame);
     }
 
@@ -1181,7 +1187,8 @@ pub mod tests {
         assert_eq!(th.rxq.used.idx.get(), 1);
         assert!(&th.net().irq_trigger.has_pending_irq(IrqType::Vring));
         // Check that the frame has been written successfully to the Rx descriptor chain.
-        th.rxq.check_used_elem(0, 3, frame.len() as u32);
+        th.rxq
+            .check_used_elem(0, 3, frame.len().try_into().unwrap());
         th.rxq.dtable[3].check_data(&frame[..100]);
         th.rxq.dtable[5].check_data(&frame[100..150]);
         th.rxq.dtable[11].check_data(&frame[150..]);
@@ -1220,11 +1227,13 @@ pub mod tests {
         assert_eq!(th.rxq.used.idx.get(), 2);
         assert!(&th.net().irq_trigger.has_pending_irq(IrqType::Vring));
         // Check that the 1st frame was written successfully to the 1st Rx descriptor chain.
-        th.rxq.check_used_elem(0, 0, frame_1.len() as u32);
+        th.rxq
+            .check_used_elem(0, 0, frame_1.len().try_into().unwrap());
         th.rxq.dtable[0].check_data(&frame_1);
         th.rxq.dtable[1].check_data(&[0; 500]);
         // Check that the 2nd frame was written successfully to the 2nd Rx descriptor chain.
-        th.rxq.check_used_elem(1, 2, frame_2.len() as u32);
+        th.rxq
+            .check_used_elem(1, 2, frame_2.len().try_into().unwrap());
         th.rxq.dtable[2].check_data(&frame_2);
         th.rxq.dtable[3].check_data(&[0; 500]);
     }
@@ -1816,7 +1825,8 @@ pub mod tests {
                 assert!(&th.net().irq_trigger.has_pending_irq(IrqType::Vring));
                 // make sure the data queue advanced
                 assert_eq!(th.rxq.used.idx.get(), 1);
-                th.rxq.check_used_elem(0, 0, frame.len() as u32);
+                th.rxq
+                    .check_used_elem(0, 0, frame.len().try_into().unwrap());
                 th.rxq.dtable[0].check_data(frame);
             }
         }
@@ -1925,7 +1935,8 @@ pub mod tests {
                 assert!(&th.net().irq_trigger.has_pending_irq(IrqType::Vring));
                 // make sure the data queue advanced
                 assert_eq!(th.rxq.used.idx.get(), 1);
-                th.rxq.check_used_elem(0, 0, frame.len() as u32);
+                th.rxq
+                    .check_used_elem(0, 0, frame.len().try_into().unwrap());
                 th.rxq.dtable[0].check_data(frame);
             }
         }

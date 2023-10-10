@@ -12,7 +12,7 @@ use versionize::{VersionMap, Versionize};
 use crate::device_manager::persist::DeviceStates;
 use crate::devices::virtio::block::persist::BlockState;
 use crate::devices::virtio::net::persist::NetConfigSpaceState;
-use crate::devices::virtio::QueueState;
+use crate::devices::virtio::{QueueState, VirtioDeviceState};
 use crate::persist::VmInfo;
 use crate::vstate::vcpu::VcpuState;
 use crate::vstate::vm::VmState;
@@ -36,6 +36,8 @@ pub const FC_V1_3_SNAP_VERSION: u16 = 7;
 pub const FC_V1_4_SNAP_VERSION: u16 = 8;
 /// Snap version for Firecracker v1.5
 pub const FC_V1_5_SNAP_VERSION: u16 = 9;
+/// Snap version for Firecracker v1.6
+pub const FC_V1_6_SNAP_VERSION: u16 = 10;
 
 lazy_static! {
     // Note: until we have a better design, this needs to be updated when the version changes.
@@ -79,6 +81,10 @@ lazy_static! {
         version_map.set_type_version(VcpuState::type_id(), 2);
 
         version_map.set_type_version(VmState::type_id(), 2);
+        version_map.set_type_version(VirtioDeviceState::type_id(), 2);
+
+        // v1.6 state change mappings
+        version_map.new_version();
 
         version_map
     };
@@ -107,6 +113,7 @@ lazy_static! {
         mapping.insert(Version::new(1, 3, 0), FC_V1_3_SNAP_VERSION);
         mapping.insert(Version::new(1, 4, 0), FC_V1_4_SNAP_VERSION);
         mapping.insert(Version::new(1, 5, 0), FC_V1_5_SNAP_VERSION);
+        mapping.insert(Version::new(1, 6, 0), FC_V1_6_SNAP_VERSION);
 
         mapping
     };

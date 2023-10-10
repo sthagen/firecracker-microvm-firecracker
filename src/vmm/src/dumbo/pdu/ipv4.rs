@@ -25,7 +25,7 @@ const PROTOCOL_OFFSET: usize = 9;
 const HEADER_CHECKSUM_OFFSET: usize = 10;
 const SOURCE_ADDRESS_OFFSET: usize = 12;
 const DESTINATION_ADDRESS_OFFSET: usize = 16;
-const OPTIONS_OFFSET: usize = 20;
+const OPTIONS_OFFSET: u8 = 20;
 
 /// Indicates version 4 of the IP protocol
 pub const IPV4_VERSION: u8 = 0x04;
@@ -82,7 +82,7 @@ impl<'a, T: NetworkBytes + Debug> IPv4Packet<'a, T> {
     pub fn from_bytes(bytes: T, verify_checksum: bool) -> Result<Self, Error> {
         let bytes_len = bytes.len();
 
-        if bytes_len < OPTIONS_OFFSET {
+        if bytes_len < usize::from(OPTIONS_OFFSET) {
             return Err(Error::SliceTooShort);
         }
 
@@ -96,7 +96,7 @@ impl<'a, T: NetworkBytes + Debug> IPv4Packet<'a, T> {
 
         let total_len = packet.total_len() as usize;
 
-        if total_len < header_len {
+        if total_len < header_len.into() {
             return Err(Error::InvalidTotalLen);
         }
 
@@ -111,7 +111,7 @@ impl<'a, T: NetworkBytes + Debug> IPv4Packet<'a, T> {
         // We ignore the TTL field since only routers should care about it. An end host has no
         // reason really to discard an otherwise valid packet.
 
-        if verify_checksum && packet.compute_checksum_unchecked(header_len) != 0 {
+        if verify_checksum && packet.compute_checksum_unchecked(header_len.into()) != 0 {
             return Err(Error::Checksum);
         }
 
@@ -123,16 +123,16 @@ impl<'a, T: NetworkBytes + Debug> IPv4Packet<'a, T> {
     /// This method returns the actual length (in bytes) of the header, and not the value of the
     /// `ihl` header field).
     #[inline]
-    pub fn version_and_header_len(&self) -> (u8, usize) {
+    pub fn version_and_header_len(&self) -> (u8, u8) {
         let x = self.bytes[VERSION_AND_IHL_OFFSET];
         let ihl = x & 0x0f;
-        let header_len = (ihl << 2) as usize;
+        let header_len = ihl << 2;
         (x >> 4, header_len)
     }
 
     /// Returns the packet header length (in bytes).
     #[inline]
-    pub fn header_len(&self) -> usize {
+    pub fn header_len(&self) -> u8 {
         let (_, header_len) = self.version_and_header_len();
         header_len
     }
@@ -207,7 +207,7 @@ impl<'a, T: NetworkBytes + Debug> IPv4Packet<'a, T> {
     /// Returns a byte slice that contains the payload of the packet.
     #[inline]
     pub fn payload(&self) -> &[u8] {
-        self.payload_unchecked(self.header_len())
+        self.payload_unchecked(self.header_len().into())
     }
 
     /// Returns the length of the inner byte sequence.
@@ -239,13 +239,14 @@ impl<'a, T: NetworkBytes + Debug> IPv4Packet<'a, T> {
             sum = (sum & 0xffff) + (sum >> 16);
         }
 
-        !(sum as u16)
+        // Safe to unwrap due to the while loop.
+        !u16::try_from(sum).unwrap()
     }
 
     /// Computes and returns the packet header checksum.
     #[inline]
     pub fn compute_checksum(&self) -> u16 {
-        self.compute_checksum_unchecked(self.header_len())
+        self.compute_checksum_unchecked(self.header_len().into())
     }
 }
 
@@ -263,7 +264,7 @@ impl<'a, T: NetworkBytesMut + Debug> IPv4Packet<'a, T> {
         src_addr: Ipv4Addr,
         dst_addr: Ipv4Addr,
     ) -> Result<Incomplete<Self>, Error> {
-        if buf.len() < OPTIONS_OFFSET {
+        if buf.len() < usize::from(OPTIONS_OFFSET) {
             return Err(Error::SliceTooShort);
         }
         let mut packet = IPv4Packet::from_bytes_unchecked(buf);
@@ -283,9 +284,9 @@ impl<'a, T: NetworkBytesMut + Debug> IPv4Packet<'a, T> {
     /// Sets the values of the `version` and `ihl` header fields (the latter is computed from the
     /// value of `header_len`).
     #[inline]
-    pub fn set_version_and_header_len(&mut self, version: u8, header_len: usize) -> &mut Self {
+    pub fn set_version_and_header_len(&mut self, version: u8, header_len: u8) -> &mut Self {
         let version = version << 4;
-        let ihl = ((header_len as u8) >> 2) & 0xf;
+        let ihl = (header_len >> 2) & 0xf;
         self.bytes[VERSION_AND_IHL_OFFSET] = version | ihl;
         self
     }
@@ -374,7 +375,7 @@ impl<'a, T: NetworkBytesMut + Debug> IPv4Packet<'a, T> {
         // Can't use self.header_len() as a fn parameter on the following line, because
         // the borrow checker complains. This may change when it becomes smarter.
         let header_len = self.header_len();
-        self.payload_mut_unchecked(header_len)
+        self.payload_mut_unchecked(header_len.into())
     }
 }
 
@@ -394,24 +395,24 @@ impl<'a, T: NetworkBytesMut + Debug> Incomplete<IPv4Packet<'a, T>> {
     #[inline]
     pub fn with_header_and_payload_len_unchecked(
         mut self,
-        header_len: usize,
-        payload_len: usize,
+        header_len: u8,
+        payload_len: u16,
         compute_checksum: bool,
     ) -> IPv4Packet<'a, T> {
-        let total_len = header_len + payload_len;
+        let total_len = u16::from(header_len) + payload_len;
         {
             let packet = &mut self.inner;
 
             // This unchecked is fine as long as total_len is smaller than the length of the
             // original slice, which should be the case if our code is not wrong.
-            packet.bytes.shrink_unchecked(total_len);
+            packet.bytes.shrink_unchecked(total_len.into());
             // Set the total_len.
-            packet.set_total_len(total_len as u16);
+            packet.set_total_len(total_len);
             if compute_checksum {
                 // Ensure this is set to 0 first.
                 packet.set_header_checksum(0);
                 // Now compute the actual checksum.
-                let checksum = packet.compute_checksum_unchecked(header_len);
+                let checksum = packet.compute_checksum_unchecked(header_len.into());
                 packet.set_header_checksum(checksum);
             }
         }
@@ -427,8 +428,8 @@ impl<'a, T: NetworkBytesMut + Debug> Incomplete<IPv4Packet<'a, T>> {
     #[inline]
     pub fn with_options_and_payload_len_unchecked(
         self,
-        options_len: usize,
-        payload_len: usize,
+        options_len: u8,
+        payload_len: u16,
         compute_checksum: bool,
     ) -> IPv4Packet<'a, T> {
         let header_len = OPTIONS_OFFSET + options_len;
@@ -444,7 +445,7 @@ impl<'a, T: NetworkBytesMut + Debug> Incomplete<IPv4Packet<'a, T>> {
     #[inline]
     pub fn with_payload_len_unchecked(
         self,
-        payload_len: usize,
+        payload_len: u16,
         compute_checksum: bool,
     ) -> IPv4Packet<'a, T> {
         let header_len = self.inner().header_len();
@@ -457,7 +458,7 @@ impl<'a, T: NetworkBytesMut + Debug> Incomplete<IPv4Packet<'a, T>> {
 #[inline]
 pub fn test_speculative_dst_addr(buf: &[u8], addr: Ipv4Addr) -> bool {
     // The unchecked methods are safe because we actually check the buffer length beforehand.
-    if buf.len() >= ethernet::PAYLOAD_OFFSET + OPTIONS_OFFSET {
+    if buf.len() >= ethernet::PAYLOAD_OFFSET + usize::from(OPTIONS_OFFSET) {
         let bytes = &buf[ethernet::PAYLOAD_OFFSET..];
         if IPv4Packet::from_bytes_unchecked(bytes).destination_address() == addr {
             return true;
@@ -471,7 +472,7 @@ mod tests {
     use super::*;
     use crate::dumbo::MacAddr;
 
-    const MAX_HEADER_LEN: usize = 60;
+    const MAX_HEADER_LEN: u8 = 60;
 
     #[test]
     fn test_set_get() {
@@ -529,10 +530,10 @@ mod tests {
         let src = Ipv4Addr::new(10, 100, 11, 21);
         let dst = Ipv4Addr::new(192, 168, 121, 35);
 
-        let buf_len = buf.len();
+        let buf_len = u16::try_from(buf.len()).unwrap();
         // No IPv4 option support for now.
         let header_len = OPTIONS_OFFSET;
-        let payload_len = buf_len - OPTIONS_OFFSET;
+        let payload_len = buf_len - u16::from(OPTIONS_OFFSET);
 
         {
             let mut p = IPv4Packet::write_header(buf.as_mut(), PROTOCOL_TCP, src, dst)
@@ -541,7 +542,7 @@ mod tests {
 
             assert_eq!(p.version_and_header_len(), (IPV4_VERSION, header_len));
             assert_eq!(p.dscp_and_ecn(), (0, 0));
-            assert_eq!(p.total_len() as usize, buf_len);
+            assert_eq!(p.total_len(), buf_len);
             assert_eq!(p.identification(), 0);
             assert_eq!(p.flags_and_fragment_offset(), (0, 0));
             assert_eq!(p.ttl(), DEFAULT_TTL);
@@ -595,20 +596,15 @@ mod tests {
         // Total length smaller than header length.
         p(buf.as_mut())
             .set_version_and_header_len(IPV4_VERSION, OPTIONS_OFFSET)
-            .set_total_len(OPTIONS_OFFSET as u16 - 1);
+            .set_total_len(u16::from(OPTIONS_OFFSET) - 1);
         look_for_error(buf.as_ref(), Error::InvalidTotalLen);
 
         // Total len not matching slice length.
-        p(buf.as_mut()).set_total_len(buf_len as u16 - 1);
+        p(buf.as_mut()).set_total_len(buf_len - 1);
         look_for_error(buf.as_ref(), Error::SliceExactLen);
 
         // The original packet header should contain a valid checksum.
-        assert_eq!(
-            p(buf.as_mut())
-                .set_total_len(buf_len as u16)
-                .compute_checksum(),
-            0
-        );
+        assert_eq!(p(buf.as_mut()).set_total_len(buf_len).compute_checksum(), 0);
 
         // Let's make it invalid.
         let checksum = p(buf.as_mut()).header_checksum();
@@ -643,7 +639,7 @@ mod tests {
 
             assert_eq!(p.compute_checksum(), 0);
             assert_eq!(p.total_len() as usize, p.len());
-            assert_eq!(p.len(), header_len + payload_len);
+            assert_eq!(p.len(), usize::from(header_len) + usize::from(payload_len));
         }
 
         {
@@ -653,7 +649,7 @@ mod tests {
 
             assert_eq!(p.compute_checksum(), 0);
             assert_eq!(p.total_len() as usize, p.len());
-            assert_eq!(p.len(), header_len + payload_len);
+            assert_eq!(p.len(), usize::from(header_len) + usize::from(payload_len));
         }
     }
 

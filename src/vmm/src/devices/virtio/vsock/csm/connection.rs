@@ -85,6 +85,7 @@ use std::time::{Duration, Instant};
 use log::{debug, error, info, warn};
 use utils::epoll::EventSet;
 use utils::vm_memory::{GuestMemoryError, GuestMemoryMmap, ReadVolatile, WriteVolatile};
+use utils::wrap_usize_to_u32;
 
 use super::super::defs::uapi;
 use super::super::packet::VsockPacket;
@@ -231,8 +232,11 @@ where
                     } else {
                         // On a successful data read, we fill in the packet with the RW op, and
                         // length of the read data.
-                        pkt.set_op(uapi::VSOCK_OP_RW).set_len(read_cnt as u32);
-                        METRICS.vsock.rx_bytes_count.add(read_cnt);
+                        // Safe to unwrap because read_cnt is no more than max_len, which is bounded
+                        // by self.peer_avail_credit(), a u32 internally.
+                        pkt.set_op(uapi::VSOCK_OP_RW)
+                            .set_len(u32::try_from(read_cnt).unwrap());
+                        METRICS.vsock.rx_bytes_count.add(read_cnt as u64);
                     }
                     self.rx_cnt += Wrapping(pkt.len());
                     self.last_fwd_cnt_to_peer = self.fwd_cnt;
@@ -475,8 +479,8 @@ where
                     };
                     0
                 });
-            self.fwd_cnt += Wrapping(flushed as u32);
-            METRICS.vsock.tx_bytes_count.add(flushed);
+            self.fwd_cnt += wrap_usize_to_u32(flushed);
+            METRICS.vsock.tx_bytes_count.add(flushed as u64);
 
             // If this connection was shutting down, but is waiting to drain the TX buffer
             // before forceful termination, the wait might be over.
@@ -627,8 +631,9 @@ where
             }
         };
         // Move the "forwarded bytes" counter ahead by how much we were able to send out.
-        self.fwd_cnt += Wrapping(written as u32);
-        METRICS.vsock.tx_bytes_count.add(written);
+        // Safe to unwrap because the maximum value is pkt.len(), which is a u32.
+        self.fwd_cnt += wrap_usize_to_u32(written);
+        METRICS.vsock.tx_bytes_count.add(written as u64);
 
         // If we couldn't write the whole slice, we'll need to push the remaining data to our
         // buffer.
@@ -921,7 +926,7 @@ mod tests {
 
         fn init_data_pkt(&mut self, mut data: &[u8]) -> &VsockPacket {
             assert!(data.len() <= self.pkt.buf_size());
-            self.init_pkt(uapi::VSOCK_OP_RW, data.len() as u32);
+            self.init_pkt(uapi::VSOCK_OP_RW, u32::try_from(data.len()).unwrap());
 
             let len = data.len();
             self.pkt
@@ -1169,7 +1174,10 @@ mod tests {
         assert!(ctx.conn.has_pending_rx());
         ctx.recv();
         assert_eq!(ctx.pkt.op(), uapi::VSOCK_OP_CREDIT_UPDATE);
-        assert_eq!(ctx.pkt.fwd_cnt(), initial_fwd_cnt + data.len() as u32 * 2);
+        assert_eq!(
+            ctx.pkt.fwd_cnt() as usize,
+            initial_fwd_cnt as usize + data.len() * 2,
+        );
         assert_eq!(ctx.conn.fwd_cnt, ctx.conn.last_fwd_cnt_to_peer);
     }
 
@@ -1262,7 +1270,7 @@ mod tests {
         // Fill up the TX buffer.
         let data = vec![0u8; ctx.pkt.buf_size()];
         ctx.init_data_pkt(data.as_slice());
-        for _i in 0..(csm_defs::CONN_TX_BUF_SIZE / data.len() as u32) {
+        for _i in 0..(csm_defs::CONN_TX_BUF_SIZE as usize / data.len()) {
             ctx.send();
         }
 

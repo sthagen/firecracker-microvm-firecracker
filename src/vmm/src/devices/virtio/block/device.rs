@@ -11,13 +11,14 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::linux::fs::MetadataExt;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 use block_io::FileEngine;
 use serde::{Deserialize, Serialize};
 use utils::eventfd::EventFd;
 use utils::kernel_version::{min_kernel_version_for_io_uring, KernelVersion};
+use utils::u64_to_usize;
 use utils::vm_memory::GuestMemoryMmap;
 use virtio_gen::virtio_blk::{
     VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_RO, VIRTIO_BLK_ID_BYTES, VIRTIO_F_VERSION_1,
@@ -101,7 +102,7 @@ impl DiskProperties {
 
         // We only support disk size, which uses the first two words of the configuration space.
         // If the image is not a multiple of the sector size, the tail bits are not exposed.
-        if disk_size % SECTOR_SIZE != 0 {
+        if disk_size % u64::from(SECTOR_SIZE) != 0 {
             warn!(
                 "Disk size {} is not a multiple of sector size {}; the remainder will not be \
                  visible to the guest.",
@@ -181,7 +182,7 @@ impl DiskProperties {
         // The config space is little endian.
         let mut config = Vec::with_capacity(BLOCK_CONFIG_SPACE_SIZE);
         for i in 0..BLOCK_CONFIG_SPACE_SIZE {
-            config.push((self.nsectors >> (8 * i)) as u8);
+            config.push(((self.nsectors >> (8 * i)) & 0xff) as u8);
         }
         config
     }
@@ -570,7 +571,7 @@ impl VirtioDevice for Block {
     }
 
     /// Returns the current device interrupt status.
-    fn interrupt_status(&self) -> Arc<AtomicUsize> {
+    fn interrupt_status(&self) -> Arc<AtomicU32> {
         self.irq_trigger.irq_status.clone()
     }
 
@@ -583,8 +584,10 @@ impl VirtioDevice for Block {
         }
         if let Some(end) = offset.checked_add(data.len() as u64) {
             // This write can't fail, offset and end are checked against config_len.
-            data.write_all(&self.config_space[offset as usize..cmp::min(end, config_len) as usize])
-                .unwrap();
+            data.write_all(
+                &self.config_space[u64_to_usize(offset)..u64_to_usize(cmp::min(end, config_len))],
+            )
+            .unwrap();
         }
     }
 
@@ -666,7 +669,7 @@ mod tests {
     fn test_disk_backing_file_helper() {
         let num_sectors = 2;
         let f = TempFile::new().unwrap();
-        let size = SECTOR_SIZE * num_sectors;
+        let size = u64::from(SECTOR_SIZE) * num_sectors;
         f.as_file().set_len(size).unwrap();
 
         let disk_properties = DiskProperties::new(
@@ -677,12 +680,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(size, SECTOR_SIZE * num_sectors);
+        assert_eq!(size, u64::from(SECTOR_SIZE) * num_sectors);
         assert_eq!(disk_properties.nsectors, num_sectors);
         let cfg = disk_properties.virtio_block_config_space();
         assert_eq!(cfg.len(), BLOCK_CONFIG_SPACE_SIZE);
         for (i, byte) in cfg.iter().enumerate() {
-            assert_eq!(*byte, (num_sectors >> (8 * i)) as u8);
+            assert_eq!(*byte, ((num_sectors >> (8 * i)) & 0xff) as u8);
         }
         // Testing `backing_file.virtio_block_disk_image_id()` implies
         // duplicating that logic in tests, so skipping it.
@@ -704,7 +707,10 @@ mod tests {
 
         let features: u64 = (1u64 << VIRTIO_F_VERSION_1) | (1u64 << VIRTIO_RING_F_EVENT_IDX);
 
-        assert_eq!(block.avail_features_by_page(0), features as u32);
+        assert_eq!(
+            block.avail_features_by_page(0),
+            (features & 0xffffffff) as u32,
+        );
         assert_eq!(block.avail_features_by_page(1), (features >> 32) as u32);
 
         for i in 2..10 {
@@ -830,8 +836,8 @@ mod tests {
             let status_addr = GuestAddress(vq.dtable[2].addr.get());
             assert_eq!(used.len, 1);
             assert_eq!(
-                mem.read_obj::<u8>(status_addr).unwrap(),
-                VIRTIO_BLK_S_IOERR as u8
+                u32::from(mem.read_obj::<u8>(status_addr).unwrap()),
+                VIRTIO_BLK_S_IOERR
             );
         }
 
@@ -855,8 +861,8 @@ mod tests {
             let status_addr = GuestAddress(vq.dtable[2].addr.get());
             assert_eq!(used.len, 1);
             assert_eq!(
-                mem.read_obj::<u8>(status_addr).unwrap(),
-                VIRTIO_BLK_S_IOERR as u8
+                u32::from(mem.read_obj::<u8>(status_addr).unwrap()),
+                VIRTIO_BLK_S_IOERR
             );
         }
     }
@@ -1042,8 +1048,8 @@ mod tests {
 
             let status_addr = GuestAddress(vq.dtable[2].addr.get());
             assert_eq!(
-                mem.read_obj::<u8>(status_addr).unwrap(),
-                VIRTIO_BLK_S_IOERR as u8
+                u32::from(mem.read_obj::<u8>(status_addr).unwrap()),
+                VIRTIO_BLK_S_IOERR
             );
         }
 
@@ -1264,8 +1270,8 @@ mod tests {
 
             let status_addr = GuestAddress(vq.dtable[2].addr.get());
             assert_eq!(
-                mem.read_obj::<u8>(status_addr).unwrap(),
-                VIRTIO_BLK_S_IOERR as u8
+                u32::from(mem.read_obj::<u8>(status_addr).unwrap()),
+                VIRTIO_BLK_S_IOERR
             );
         }
     }
@@ -1425,10 +1431,12 @@ mod tests {
             let status_addr = vq.dtable[used.id as usize + 1].addr.get();
             assert_eq!(used.len, 1);
             assert_eq!(
-                vq.memory()
-                    .read_obj::<u8>(GuestAddress(status_addr))
-                    .unwrap(),
-                VIRTIO_BLK_S_OK as u8
+                u32::from(
+                    vq.memory()
+                        .read_obj::<u8>(GuestAddress(status_addr))
+                        .unwrap(),
+                ),
+                VIRTIO_BLK_S_OK
             );
         }
     }

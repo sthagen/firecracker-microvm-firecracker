@@ -99,7 +99,9 @@ pub struct PendingRequest {
 impl PendingRequest {
     fn write_status_and_finish(self, status: &Status, mem: &GuestMemoryMmap) -> FinishedRequest {
         let (num_bytes_to_mem, status_code) = match status {
-            Status::Ok { num_bytes_to_mem } => (*num_bytes_to_mem, VIRTIO_BLK_S_OK),
+            Status::Ok { num_bytes_to_mem } => {
+                (*num_bytes_to_mem, u8::try_from(VIRTIO_BLK_S_OK).unwrap())
+            }
             Status::IoErr {
                 num_bytes_to_mem,
                 err,
@@ -109,17 +111,17 @@ impl PendingRequest {
                     "Failed to execute {:?} virtio block request: {:?}",
                     self.r#type, err
                 );
-                (*num_bytes_to_mem, VIRTIO_BLK_S_IOERR)
+                (*num_bytes_to_mem, u8::try_from(VIRTIO_BLK_S_IOERR).unwrap())
             }
             Status::Unsupported { op } => {
                 METRICS.block.invalid_reqs_count.inc();
                 error!("Received unsupported virtio block request: {}", op);
-                (0, VIRTIO_BLK_S_UNSUPP)
+                (0, u8::try_from(VIRTIO_BLK_S_UNSUPP).unwrap())
             }
         };
 
         let num_bytes_to_mem = mem
-            .write_obj(status_code as u8, self.status_addr)
+            .write_obj(status_code, self.status_addr)
             .map(|_| {
                 // Account for the status byte
                 num_bytes_to_mem + 1
@@ -140,7 +142,7 @@ impl PendingRequest {
         let status = match (res, self.r#type) {
             (Ok(transferred_data_len), RequestType::In) => {
                 let status = Status::from_data(self.data_len, transferred_data_len, true);
-                METRICS.block.read_bytes.add(transferred_data_len as usize);
+                METRICS.block.read_bytes.add(transferred_data_len.into());
                 if let Status::Ok { .. } = status {
                     METRICS.block.read_count.inc();
                 }
@@ -148,7 +150,7 @@ impl PendingRequest {
             }
             (Ok(transferred_data_len), RequestType::Out) => {
                 let status = Status::from_data(self.data_len, transferred_data_len, false);
-                METRICS.block.write_bytes.add(transferred_data_len as usize);
+                METRICS.block.write_bytes.add(transferred_data_len.into());
                 if let Status::Ok { .. } = status {
                     METRICS.block.write_count.inc();
                 }
@@ -283,7 +285,7 @@ impl Request {
             RequestType::In | RequestType::Out => {
                 // Check that the data length is a multiple of 512 as specified in the virtio
                 // standard.
-                if u64::from(req.data_len) % SECTOR_SIZE != 0 {
+                if req.data_len % SECTOR_SIZE != 0 {
                     return Err(BlockError::InvalidDataLength);
                 }
                 let top_sector = req
@@ -782,15 +784,15 @@ mod tests {
 
         // Use first 4 bits of randomness to shift the gap size between this descriptor
         // and the next one.
-        let mut next_desc_dist = max_desc_len + (0x1000 << (sparsity & 0xF));
+        let mut next_desc_dist = u64::from(max_desc_len) + (0x1000 << (sparsity & 0xF));
         let data_addr = req_type_addr.checked_add(next_desc_dist).unwrap();
 
         // Use next 4 bits of randomness to shift gap size between this descriptor
         // and the next one.
-        next_desc_dist = max_desc_len + (0x1000 << ((sparsity & 0xF0) >> 4));
+        next_desc_dist = u64::from(max_desc_len) + (0x1000 << ((sparsity & 0xF0) >> 4));
         let status_addr = data_addr.checked_add(next_desc_dist).unwrap();
 
-        let mem_end = status_addr.checked_add(max_desc_len).unwrap();
+        let mem_end = status_addr.checked_add(u64::from(max_desc_len)).unwrap();
         let mem: GuestMemoryMmap = create_anon_guest_memory(
             &[(
                 GuestAddress(base_addr),
@@ -806,8 +808,8 @@ mod tests {
 
         // Make sure that data_len is a multiple of 512
         // and that 512 <= data_len <= (4096 + 512).
-        let valid_data_len = ((data_len & 4096) | (SECTOR_SIZE as u32 - 1)) + 1;
-        let sectors_len = u64::from(valid_data_len) / SECTOR_SIZE;
+        let valid_data_len = ((data_len & 4096) | (SECTOR_SIZE - 1)) + 1;
+        let sectors_len = u64::from(valid_data_len / SECTOR_SIZE);
         // Craft a random request with the randomized parameters.
         let mut request = Request {
             r#type: request_type,
@@ -819,7 +821,7 @@ mod tests {
         let mut request_header = RequestHeader::new(virtio_request_id, request.sector);
 
         chain.header_desc.addr.set(req_type_addr.0);
-        chain.header_desc.len.set(max_desc_len as u32);
+        chain.header_desc.len.set(max_desc_len);
         chain.set_header(request_header);
 
         // Flush requests have no data desc.

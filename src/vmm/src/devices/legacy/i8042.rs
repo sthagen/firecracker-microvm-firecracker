@@ -205,7 +205,7 @@ impl I8042Device {
             _ => read_ok = false,
         }
         if read_ok {
-            METRICS.i8042.read_count.add(data.len());
+            METRICS.i8042.read_count.add(data.len() as u64);
         } else {
             METRICS.i8042.missed_read_count.inc();
         }
@@ -412,7 +412,7 @@ mod tests {
 
         // Test buffer full.
         for i in 0..BUF_SIZE {
-            i8042.push_byte(i as u8).unwrap();
+            i8042.push_byte(i.try_into().unwrap()).unwrap();
             assert_eq!(i8042.buf_len(), i + 1);
         }
         assert_eq!(

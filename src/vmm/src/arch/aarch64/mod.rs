@@ -40,7 +40,7 @@ pub const MMIO_MEM_SIZE: u64 = layout::DRAM_MEM_START - layout::MAPPED_IO_START;
 /// Returns a Vec of the valid memory addresses for aarch64.
 /// See [`layout`](layout) module for a drawing of the specific memory model for this platform.
 pub fn arch_memory_regions(size: usize) -> Vec<(GuestAddress, usize)> {
-    let dram_size = min(size as u64, layout::DRAM_MEM_MAX_SIZE) as usize;
+    let dram_size = min(size, layout::DRAM_MEM_MAX_SIZE);
     vec![(GuestAddress(layout::DRAM_MEM_START), dram_size)]
 }
 
@@ -129,7 +129,7 @@ mod tests {
         let regions = arch_memory_regions(1usize << 41);
         assert_eq!(1, regions.len());
         assert_eq!(GuestAddress(super::layout::DRAM_MEM_START), regions[0].0);
-        assert_eq!(super::layout::DRAM_MEM_MAX_SIZE, regions[0].1 as u64);
+        assert_eq!(super::layout::DRAM_MEM_MAX_SIZE, regions[0].1);
     }
 
     #[test]
