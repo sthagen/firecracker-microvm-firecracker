@@ -9,15 +9,14 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::fmt::Debug;
 
-use utils::vm_memory::{
-    Address, Bytes, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap,
-};
 use vm_fdt::{Error as VmFdtError, FdtWriter, FdtWriterNode};
+use vm_memory::GuestMemoryError;
 
 use super::super::{DeviceType, InitrdConfig};
 use super::cache_info::{read_cache_config, CacheEntry};
 use super::get_fdt_addr;
 use super::gic::GICDevice;
+use crate::vstate::memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
 // This is a value for uniquely identifying the FDT node declaring the interrupt controller.
 const GIC_PHANDLE: u32 = 1;
@@ -427,6 +426,7 @@ mod tests {
     use super::*;
     use crate::arch::aarch64::gic::create_gic;
     use crate::arch::aarch64::{arch_memory_regions, layout};
+    use crate::vstate::memory::{GuestMemoryExtension, GuestMemoryMmap};
 
     const LEN: u64 = 4096;
 
@@ -459,8 +459,8 @@ mod tests {
     #[test]
     fn test_create_fdt_with_devices() {
         let regions = arch_memory_regions(layout::FDT_MAX_SIZE + 0x1000);
-        let mem = utils::vm_memory::test_utils::create_anon_guest_memory(&regions, false)
-            .expect("Cannot initialize memory");
+        let mem =
+            GuestMemoryMmap::from_raw_regions(&regions, false).expect("Cannot initialize memory");
 
         let dev_info: HashMap<(DeviceType, std::string::String), MMIODeviceInfo> = [
             (
@@ -499,8 +499,8 @@ mod tests {
     #[test]
     fn test_create_fdt() {
         let regions = arch_memory_regions(layout::FDT_MAX_SIZE + 0x1000);
-        let mem = utils::vm_memory::test_utils::create_anon_guest_memory(&regions, false)
-            .expect("Cannot initialize memory");
+        let mem =
+            GuestMemoryMmap::from_raw_regions(&regions, false).expect("Cannot initialize memory");
         let kvm = Kvm::new().unwrap();
         let vm = kvm.create_vm().unwrap();
         let gic = create_gic(&vm, 1, None).unwrap();
@@ -557,8 +557,8 @@ mod tests {
     #[test]
     fn test_create_fdt_with_initrd() {
         let regions = arch_memory_regions(layout::FDT_MAX_SIZE + 0x1000);
-        let mem = utils::vm_memory::test_utils::create_anon_guest_memory(&regions, false)
-            .expect("Cannot initialize memory");
+        let mem =
+            GuestMemoryMmap::from_raw_regions(&regions, false).expect("Cannot initialize memory");
         let kvm = Kvm::new().unwrap();
         let vm = kvm.create_vm().unwrap();
         let gic = create_gic(&vm, 1, None).unwrap();

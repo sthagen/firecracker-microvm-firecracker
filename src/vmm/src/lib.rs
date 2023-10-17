@@ -85,7 +85,6 @@ pub mod devices;
 pub mod dumbo;
 /// Logger
 pub mod logger;
-pub mod memory_snapshot;
 /// microVM Metadata Service MMDS
 pub mod mmds;
 /// Save/restore utilities.
@@ -104,6 +103,8 @@ pub mod utilities;
 pub mod version_map;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
+/// Module with volotile traits and impls.
+pub mod volatile;
 /// Module with virtual state structs.
 pub mod vstate;
 
@@ -122,7 +123,6 @@ use utils::epoll::EventSet;
 use utils::eventfd::EventFd;
 use utils::terminal::Terminal;
 use utils::u64_to_usize;
-use utils::vm_memory::{GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use vstate::vcpu::{self, KvmVcpuConfigureError, StartThreadedError, VcpuSendEventError};
 
 use crate::arch::DeviceType;
@@ -137,10 +137,12 @@ use crate::devices::virtio::{
     TYPE_NET,
 };
 use crate::logger::{error, info, warn, MetricsError, METRICS};
-use crate::memory_snapshot::SnapshotMemory;
 use crate::persist::{MicrovmState, MicrovmStateError, VmInfo};
 use crate::rate_limiter::BucketUpdate;
 use crate::vmm_config::instance_info::{InstanceInfo, VmState};
+use crate::vstate::memory::{
+    GuestMemory, GuestMemoryExtension, GuestMemoryMmap, GuestMemoryRegion,
+};
 use crate::vstate::vcpu::VcpuState;
 pub use crate::vstate::vcpu::{Vcpu, VcpuConfig, VcpuEvent, VcpuHandle, VcpuResponse};
 pub use crate::vstate::vm::Vm;

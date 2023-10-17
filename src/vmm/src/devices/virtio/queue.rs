@@ -9,11 +9,10 @@ use std::cmp::min;
 use std::num::Wrapping;
 use std::sync::atomic::{fence, Ordering};
 
-use utils::vm_memory::{
-    Address, ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap,
-};
-
 use crate::logger::error;
+use crate::vstate::memory::{
+    Address, ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap,
+};
 
 pub(super) const VIRTQ_DESC_F_NEXT: u16 = 0x1;
 pub(super) const VIRTQ_DESC_F_WRITE: u16 = 0x2;
@@ -34,7 +33,7 @@ pub enum QueueError {
     /// Descriptor index out of bounds: {0}.
     DescIndexOutOfBounds(u16),
     /// Failed to write value into the virtio queue used ring: {0}
-    UsedRing(#[from] GuestMemoryError),
+    UsedRing(#[from] vm_memory::GuestMemoryError),
 }
 
 /// A virtio descriptor constraints with C representative.
@@ -564,14 +563,13 @@ mod verification {
     use std::mem::ManuallyDrop;
     use std::num::Wrapping;
 
-    use utils::vm_memory::{
-        Address, AtomicBitmap, Bytes, FileOffset, GuestAddress, GuestMemory, GuestMemoryMmap,
-        GuestRegionMmap, MmapRegion,
-    };
-
     use crate::devices::virtio::queue::Descriptor;
     use crate::devices::virtio::{
         DescriptorChain, Queue, FIRECRACKER_MAX_QUEUE_SIZE, VIRTQ_DESC_F_NEXT,
+    };
+    use crate::vstate::memory::{
+        Address, AtomicBitmap, Bytes, FileOffset, GuestAddress, GuestMemory, GuestMemoryMmap,
+        GuestRegionMmap, MmapRegion,
     };
 
     pub struct ProofContext(pub Queue, pub GuestMemoryMmap);
@@ -985,12 +983,10 @@ mod verification {
 #[cfg(test)]
 mod tests {
 
-    use utils::vm_memory::test_utils::create_anon_guest_memory;
-    use utils::vm_memory::{GuestAddress, GuestMemoryMmap};
-
     pub use super::*;
     use crate::devices::virtio::test_utils::{default_mem, single_region_mem, VirtQueue};
     use crate::devices::virtio::QueueError::{DescIndexOutOfBounds, UsedRing};
+    use crate::vstate::memory::{GuestAddress, GuestMemoryExtension, GuestMemoryMmap};
 
     impl Queue {
         fn avail_event(&self, mem: &GuestMemoryMmap) -> u16 {
@@ -1004,7 +1000,7 @@ mod tests {
 
     #[test]
     fn test_checked_new_descriptor_chain() {
-        let m = &create_anon_guest_memory(
+        let m = &GuestMemoryMmap::from_raw_regions(
             &[(GuestAddress(0), 0x10000), (GuestAddress(0x20000), 0x2000)],
             false,
         )
@@ -1423,7 +1419,9 @@ mod tests {
 
     #[test]
     fn test_queue_error_display() {
-        let err = UsedRing(GuestMemoryError::InvalidGuestAddress(GuestAddress(0)));
+        let err = UsedRing(vm_memory::GuestMemoryError::InvalidGuestAddress(
+            GuestAddress(0),
+        ));
         let _ = format!("{}{:?}", err, err);
 
         let err = DescIndexOutOfBounds(1);

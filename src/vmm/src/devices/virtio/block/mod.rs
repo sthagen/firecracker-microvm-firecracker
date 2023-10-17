@@ -10,7 +10,7 @@ pub mod persist;
 pub mod request;
 pub mod test_utils;
 
-use utils::vm_memory::GuestMemoryError;
+use vm_memory::GuestMemoryError;
 
 pub use self::device::{Block, CacheType};
 pub use self::event_handler::*;

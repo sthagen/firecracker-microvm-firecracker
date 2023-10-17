@@ -9,7 +9,7 @@ pub mod persist;
 pub mod test_utils;
 mod util;
 
-use utils::vm_memory::GuestMemoryError;
+use vm_memory::GuestMemoryError;
 
 pub use self::device::{Balloon, BalloonConfig, BalloonStats};
 use crate::devices::virtio::FIRECRACKER_MAX_QUEUE_SIZE;

@@ -18,7 +18,6 @@ use snapshot::Snapshot;
 use userfaultfd::{FeatureFlags, Uffd, UffdBuilder};
 use utils::sock_ctrl_msg::ScmSocket;
 use utils::u64_to_usize;
-use utils::vm_memory::{GuestMemory, GuestMemoryMmap};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 
@@ -34,7 +33,6 @@ use crate::device_manager::persist::{DevicePersistError, DeviceStates};
 use crate::devices::virtio::gen::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use crate::devices::virtio::TYPE_NET;
 use crate::logger::{info, warn};
-use crate::memory_snapshot::{GuestMemoryState, SnapshotMemory};
 use crate::resources::VmResources;
 #[cfg(target_arch = "x86_64")]
 use crate::version_map::FC_V0_23_SNAP_VERSION;
@@ -47,9 +45,12 @@ use crate::vmm_config::machine_config::MAX_SUPPORTED_VCPUS;
 use crate::vmm_config::snapshot::{
     CreateSnapshotParams, LoadSnapshotParams, MemBackendType, SnapshotType,
 };
+use crate::vstate::memory::{
+    GuestMemory, GuestMemoryExtension, GuestMemoryMmap, GuestMemoryState, MemoryError,
+};
 use crate::vstate::vcpu::{VcpuSendEventError, VcpuState};
 use crate::vstate::vm::VmState;
-use crate::{mem_size_mib, memory_snapshot, vstate, EventManager, Vmm, VmmError};
+use crate::{mem_size_mib, vstate, EventManager, Vmm, VmmError};
 
 #[cfg(target_arch = "x86_64")]
 const FC_V0_23_MAX_DEVICES: u32 = 11;
@@ -194,7 +195,7 @@ pub enum CreateSnapshotError {
     /// Cannot translate microVM version to snapshot data version
     UnsupportedVersion,
     /// Cannot write memory file: {0}
-    Memory(memory_snapshot::SnapshotMemoryError),
+    Memory(MemoryError),
     /// Cannot perform {0} on the memory backing file: {1}
     MemoryBackingFile(&'static str, io::Error),
     /// Cannot save the microVM state: {0}
@@ -558,7 +559,7 @@ pub enum GuestMemoryFromFileError {
     /// Failed to load guest memory: {0}
     File(#[from] std::io::Error),
     /// Failed to restore guest memory: {0}
-    Restore(#[from] crate::memory_snapshot::SnapshotMemoryError),
+    Restore(#[from] MemoryError),
 }
 
 fn guest_memory_from_file(
@@ -567,7 +568,7 @@ fn guest_memory_from_file(
     track_dirty_pages: bool,
 ) -> Result<GuestMemoryMmap, GuestMemoryFromFileError> {
     let mem_file = File::open(mem_file_path)?;
-    let guest_mem = GuestMemoryMmap::restore(Some(&mem_file), mem_state, track_dirty_pages)?;
+    let guest_mem = GuestMemoryMmap::from_state(Some(&mem_file), mem_state, track_dirty_pages)?;
     Ok(guest_mem)
 }
 
@@ -575,7 +576,7 @@ fn guest_memory_from_file(
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum GuestMemoryFromUffdError {
     /// Failed to restore guest memory: {0}
-    Restore(#[from] crate::memory_snapshot::SnapshotMemoryError),
+    Restore(#[from] MemoryError),
     /// Failed to UFFD object: {0}
     Create(userfaultfd::Error),
     /// Failed to register memory address range with the userfaultfd object: {0}
@@ -592,7 +593,7 @@ fn guest_memory_from_uffd(
     track_dirty_pages: bool,
     enable_balloon: bool,
 ) -> Result<(GuestMemoryMmap, Option<Uffd>), GuestMemoryFromUffdError> {
-    let guest_memory = GuestMemoryMmap::restore(None, mem_state, track_dirty_pages)?;
+    let guest_memory = GuestMemoryMmap::from_state(None, mem_state, track_dirty_pages)?;
 
     let mut uffd_builder = UffdBuilder::new();
 
@@ -688,7 +689,6 @@ mod tests {
     };
     #[cfg(target_arch = "aarch64")]
     use crate::construct_kvm_mpidrs;
-    use crate::memory_snapshot::SnapshotMemory;
     use crate::version_map::{FC_VERSION_TO_SNAP_VERSION, VERSION_MAP};
     use crate::vmm_config::balloon::BalloonDeviceConfig;
     use crate::vmm_config::drive::CacheType;
@@ -827,9 +827,8 @@ mod tests {
 
     #[test]
     fn test_create_snapshot_error_display() {
-        use utils::vm_memory::GuestMemoryError;
-
         use crate::persist::CreateSnapshotError::*;
+        use crate::vstate::memory::MemoryError;
 
         let err = DirtyBitmap(VmmError::DirtyBitmap(kvm_ioctls::Error::new(20)));
         let _ = format!("{}{:?}", err, err);
@@ -840,8 +839,8 @@ mod tests {
         let err = UnsupportedVersion;
         let _ = format!("{}{:?}", err, err);
 
-        let err = Memory(memory_snapshot::SnapshotMemoryError::WriteMemory(
-            GuestMemoryError::HostAddressNotAvailable,
+        let err = Memory(MemoryError::WriteMemory(
+            vm_memory::GuestMemoryError::HostAddressNotAvailable,
         ));
         let _ = format!("{}{:?}", err, err);
 
