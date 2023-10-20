@@ -51,13 +51,13 @@ unsafe impl ByteValued for Descriptor {}
 
 /// A virtio descriptor chain.
 #[derive(Debug)]
-pub struct DescriptorChain<'a> {
+pub struct DescriptorChain<'a, M: GuestMemory = GuestMemoryMmap> {
     desc_table: GuestAddress,
     queue_size: u16,
     ttl: u16, // used to prevent infinite chain cycles
 
     /// Reference to guest memory
-    pub mem: &'a GuestMemoryMmap,
+    pub mem: &'a M,
 
     /// Index into the descriptor table
     pub index: u16,
@@ -76,13 +76,13 @@ pub struct DescriptorChain<'a> {
     pub next: u16,
 }
 
-impl<'a> DescriptorChain<'a> {
+impl<'a, M: GuestMemory> DescriptorChain<'a, M> {
     fn checked_new(
-        mem: &GuestMemoryMmap,
+        mem: &'a M,
         desc_table: GuestAddress,
         queue_size: u16,
         index: u16,
-    ) -> Option<DescriptorChain> {
+    ) -> Option<Self> {
         if index >= queue_size {
             return None;
         }
@@ -139,7 +139,7 @@ impl<'a> DescriptorChain<'a> {
     ///
     /// Note that this is distinct from the next descriptor chain returned by `AvailIter`, which is
     /// the head of the next _available_ descriptor chain.
-    pub fn next_descriptor(&self) -> Option<DescriptorChain<'a>> {
+    pub fn next_descriptor(&self) -> Option<Self> {
         if self.has_next() {
             DescriptorChain::checked_new(self.mem, self.desc_table, self.queue_size, self.next).map(
                 |mut c| {
@@ -236,7 +236,7 @@ impl Queue {
     }
 
     /// Validates the queue's in-memory layout is correct.
-    pub fn is_layout_valid(&self, mem: &GuestMemoryMmap) -> bool {
+    pub fn is_layout_valid<M: GuestMemory>(&self, mem: &M) -> bool {
         let queue_size = usize::from(self.actual_size());
         let desc_table = self.desc_table;
         let desc_table_size = 16 * queue_size;
@@ -289,7 +289,7 @@ impl Queue {
     }
 
     /// Validates that the queue's representation is correct.
-    pub fn is_valid(&self, mem: &GuestMemoryMmap) -> bool {
+    pub fn is_valid<M: GuestMemory>(&self, mem: &M) -> bool {
         if !self.is_layout_valid(mem) {
             false
         } else if self.len(mem) > self.max_size {
@@ -305,19 +305,19 @@ impl Queue {
     }
 
     /// Returns the number of yet-to-be-popped descriptor chains in the avail ring.
-    fn len(&self, mem: &GuestMemoryMmap) -> u16 {
+    fn len<M: GuestMemory>(&self, mem: &M) -> u16 {
         debug_assert!(self.is_layout_valid(mem));
 
         (self.avail_idx(mem) - self.next_avail).0
     }
 
     /// Checks if the driver has made any descriptor chains available in the avail ring.
-    pub fn is_empty(&self, mem: &GuestMemoryMmap) -> bool {
+    pub fn is_empty<M: GuestMemory>(&self, mem: &M) -> bool {
         self.len(mem) == 0
     }
 
     /// Pop the first available descriptor chain from the avail ring.
-    pub fn pop<'b>(&mut self, mem: &'b GuestMemoryMmap) -> Option<DescriptorChain<'b>> {
+    pub fn pop<'b, M: GuestMemory>(&mut self, mem: &'b M) -> Option<DescriptorChain<'b, M>> {
         debug_assert!(self.is_layout_valid(mem));
 
         let len = self.len(mem);
@@ -343,10 +343,10 @@ impl Queue {
 
     /// Try to pop the first available descriptor chain from the avail ring.
     /// If no descriptor is available, enable notifications.
-    pub fn pop_or_enable_notification<'b>(
+    pub fn pop_or_enable_notification<'b, M: GuestMemory>(
         &mut self,
-        mem: &'b GuestMemoryMmap,
-    ) -> Option<DescriptorChain<'b>> {
+        mem: &'b M,
+    ) -> Option<DescriptorChain<'b, M>> {
         if !self.uses_notif_suppression {
             return self.pop(mem);
         }
@@ -363,7 +363,10 @@ impl Queue {
     /// # Important
     /// This is an internal method that ASSUMES THAT THERE ARE AVAILABLE DESCRIPTORS. Otherwise it
     /// will retrieve a descriptor that contains garbage data (obsolete/empty).
-    fn do_pop_unchecked<'b>(&mut self, mem: &'b GuestMemoryMmap) -> Option<DescriptorChain<'b>> {
+    fn do_pop_unchecked<'b, M: GuestMemory>(
+        &mut self,
+        mem: &'b M,
+    ) -> Option<DescriptorChain<'b, M>> {
         // This fence ensures all subsequent reads see the updated driver writes.
         fence(Ordering::Acquire);
 
@@ -414,9 +417,9 @@ impl Queue {
     }
 
     /// Puts an available descriptor head into the used ring for use by the guest.
-    pub fn add_used(
+    pub fn add_used<M: GuestMemory>(
         &mut self,
-        mem: &GuestMemoryMmap,
+        mem: &M,
         desc_index: u16,
         len: u32,
     ) -> Result<(), QueueError> {
@@ -453,7 +456,7 @@ impl Queue {
     /// Fetch the available ring index (`virtq_avail->idx`) from guest memory.
     /// This is written by the driver, to indicate the next slot that will be filled in the avail
     /// ring.
-    fn avail_idx(&self, mem: &GuestMemoryMmap) -> Wrapping<u16> {
+    fn avail_idx<M: GuestMemory>(&self, mem: &M) -> Wrapping<u16> {
         // Bound checks for queue inner data have already been performed, at device activation time,
         // via `self.is_valid()`, so it's safe to unwrap and use unchecked offsets here.
         // Note: the `MmioTransport` code ensures that queue addresses cannot be changed by the
@@ -465,7 +468,7 @@ impl Queue {
 
     /// Get the value of the used event field of the avail ring.
     #[inline(always)]
-    pub fn used_event(&self, mem: &GuestMemoryMmap) -> Wrapping<u16> {
+    pub fn used_event<M: GuestMemory>(&self, mem: &M) -> Wrapping<u16> {
         debug_assert!(self.is_layout_valid(mem));
 
         // We need to find the `used_event` field from the avail ring.
@@ -477,7 +480,7 @@ impl Queue {
     }
 
     /// Helper method that writes `val` to the `avail_event` field of the used ring.
-    fn set_avail_event(&mut self, val: u16, mem: &GuestMemoryMmap) {
+    fn set_avail_event<M: GuestMemory>(&mut self, val: u16, mem: &M) {
         debug_assert!(self.is_layout_valid(mem));
 
         let avail_event_addr = self
@@ -491,7 +494,7 @@ impl Queue {
     /// successfully enabled. Otherwise it means that one or more descriptors can still be consumed
     /// from the available ring and we can't guarantee that there will be a notification. In this
     /// case the caller might want to consume the mentioned descriptors and call this method again.
-    pub fn try_enable_notification(&mut self, mem: &GuestMemoryMmap) -> bool {
+    pub fn try_enable_notification<M: GuestMemory>(&mut self, mem: &M) -> bool {
         debug_assert!(self.is_layout_valid(mem));
 
         // If the device doesn't use notification suppression, we'll continue to get notifications
@@ -537,7 +540,7 @@ impl Queue {
     /// updates `used_event` and/or the notification conditions hold once more.
     ///
     /// This is similar to the `vring_need_event()` method implemented by the Linux kernel.
-    pub fn prepare_kick(&mut self, mem: &GuestMemoryMmap) -> bool {
+    pub fn prepare_kick<M: GuestMemory>(&mut self, mem: &M) -> bool {
         debug_assert!(self.is_layout_valid(mem));
 
         // If the device doesn't use notification suppression, always return true
@@ -559,25 +562,87 @@ impl Queue {
 }
 
 #[cfg(kani)]
+#[allow(dead_code)]
 mod verification {
     use std::mem::ManuallyDrop;
     use std::num::Wrapping;
+
+    use vm_memory::guest_memory::GuestMemoryIterator;
+    use vm_memory::{GuestMemoryRegion, MemoryRegionAddress};
 
     use crate::devices::virtio::queue::Descriptor;
     use crate::devices::virtio::{
         DescriptorChain, Queue, FIRECRACKER_MAX_QUEUE_SIZE, VIRTQ_DESC_F_NEXT,
     };
-    use crate::vstate::memory::{
-        Address, AtomicBitmap, Bytes, FileOffset, GuestAddress, GuestMemory, GuestMemoryMmap,
-        GuestRegionMmap, MmapRegion,
-    };
+    use crate::vstate::memory::{Bytes, FileOffset, GuestAddress, GuestMemory, MmapRegion};
 
-    pub struct ProofContext(pub Queue, pub GuestMemoryMmap);
+    /// A made-for-kani version of `vm_memory::GuestMemoryMmap`. Unlike the real
+    /// `GuestMemoryMmap`, which manages a list of regions and then does a binary
+    /// search to determine which region a specific read or write request goes to,
+    /// this only uses a single region. Eliminating this binary search significantly
+    /// speeds up all queue proofs, because it eliminates the only loop contained herein,
+    /// meaning we can use `kani::unwind(0)` instead of `kani::unwind(2)`. Functionally,
+    /// it works identically to `GuestMemoryMmap` with only a single contained region.
+    pub struct ProofGuestMemory {
+        the_region: vm_memory::GuestRegionMmap,
+    }
+
+    impl<'a> GuestMemoryIterator<'a, vm_memory::GuestRegionMmap> for ProofGuestMemory {
+        type Iter = std::iter::Once<&'a vm_memory::GuestRegionMmap>;
+    }
+
+    impl GuestMemory for ProofGuestMemory {
+        type R = vm_memory::GuestRegionMmap;
+        type I = Self;
+
+        fn num_regions(&self) -> usize {
+            1
+        }
+
+        fn find_region(&self, addr: GuestAddress) -> Option<&Self::R> {
+            self.the_region
+                .to_region_addr(addr)
+                .map(|_| &self.the_region)
+        }
+
+        fn iter(&self) -> <Self::I as GuestMemoryIterator<Self::R>>::Iter {
+            std::iter::once(&self.the_region)
+        }
+
+        fn try_access<F>(
+            &self,
+            count: usize,
+            addr: GuestAddress,
+            mut f: F,
+        ) -> vm_memory::guest_memory::Result<usize>
+        where
+            F: FnMut(
+                usize,
+                usize,
+                MemoryRegionAddress,
+                &Self::R,
+            ) -> vm_memory::guest_memory::Result<usize>,
+        {
+            // We only have a single region, meaning a lot of the complications of the default
+            // try_access implementation for dealing with reads/writes across multiple
+            // regions does not apply.
+            let region_addr = self
+                .the_region
+                .to_region_addr(addr)
+                .ok_or(vm_memory::guest_memory::Error::InvalidGuestAddress(addr))?;
+            self.the_region
+                .checked_offset(region_addr, count)
+                .ok_or(vm_memory::guest_memory::Error::InvalidGuestAddress(addr))?;
+            f(0, count, region_addr, &self.the_region)
+        }
+    }
+
+    pub struct ProofContext(pub Queue, pub ProofGuestMemory);
 
     pub struct MmapRegionStub {
         addr: *mut u8,
         size: usize,
-        bitmap: Option<AtomicBitmap>,
+        bitmap: (),
         file_offset: Option<FileOffset>,
         prot: i32,
         flags: i32,
@@ -595,7 +660,7 @@ mod verification {
     // able to change its address, as it is 16-byte aligned.
     const GUEST_MEMORY_SIZE: usize = QUEUE_END as usize + 30;
 
-    fn guest_memory(memory: *mut u8) -> GuestMemoryMmap {
+    fn guest_memory(memory: *mut u8) -> ProofGuestMemory {
         // Ideally, we'd want to do
         // let region = unsafe {MmapRegionBuilder::new(GUEST_MEMORY_SIZE)
         //    .with_raw_mmap_pointer(bytes.as_mut_ptr())
@@ -621,18 +686,21 @@ mod verification {
             hugetlbfs: None,
         };
 
-        let region: MmapRegion<Option<AtomicBitmap>> = unsafe { std::mem::transmute(region_stub) };
+        let region: MmapRegion<()> = unsafe { std::mem::transmute(region_stub) };
 
-        let guest_region = GuestRegionMmap::new(region, GuestAddress(GUEST_MEMORY_BASE)).unwrap();
+        let guest_region =
+            vm_memory::GuestRegionMmap::new(region, GuestAddress(GUEST_MEMORY_BASE)).unwrap();
 
         // Use a single memory region, just as firecracker does for guests of size < 2GB
         // For largest guests, firecracker uses two regions (due to the MMIO gap being
         // at the top of 32-bit address space)
-        GuestMemoryMmap::from_regions(vec![guest_region]).unwrap()
+        ProofGuestMemory {
+            the_region: guest_region,
+        }
     }
 
     // can't implement kani::Arbitrary for the relevant types due to orphan rules
-    fn setup_kani_guest_memory() -> GuestMemoryMmap {
+    fn setup_kani_guest_memory() -> ProofGuestMemory {
         // Non-deterministic Vec that will be used as the guest memory. We use `exact_vec` for now
         // as `any_vec` will likely result in worse performance. We do not loose much from
         // `exact_vec`, as our proofs do not make any assumptions about "filling" guest
@@ -646,7 +714,7 @@ mod verification {
         )
     }
 
-    fn setup_zeroed_guest_memory() -> GuestMemoryMmap {
+    fn setup_zeroed_guest_memory() -> ProofGuestMemory {
         guest_memory(unsafe {
             std::alloc::alloc_zeroed(std::alloc::Layout::from_size_align_unchecked(
                 GUEST_MEMORY_SIZE,
@@ -755,9 +823,25 @@ mod verification {
         }
     }
 
+    mod stubs {
+        use super::*;
+
+        // Calls to set_avail_event tend to cause memory to grow unboundedly during verification.
+        // The function writes to the `avail_event` of the virtio queue, which is not read
+        // from by the device. It is only intended to be used by guest. Therefore, it does not
+        // affect any device functionality (e.g. its only call site, try_enable_notification,
+        // will behave independently of what value was written here). Thus we can stub it out
+        // with a no-op. Note that we have a separate harness for set_avail_event, to ensure
+        // the function itself is sound.
+        fn set_avail_event<M: GuestMemory>(_self: &mut Queue, _val: u16, _mem: &M) {
+            // do nothing
+        }
+    }
+
     #[kani::proof]
-    #[kani::unwind(2)] // Due to guest memory regions being stored in a BTreeMap, which employs binary search for
-                       // resolving guest addresses to regions
+    #[kani::unwind(0)] // There are no loops anywhere, but kani really enjoys getting stuck in std::ptr::drop_in_place.
+                       // This is a compiler intrinsic that has a "dummy" implementation in stdlib that just
+                       // recursively calls itself. Kani will generally unwind this recursion infinitely
     fn verify_spec_2_6_7_2() {
         // Section 2.6.7.2 deals with device-to-driver notification suppression.
         // It describes a mechanism by which the driver can tell the device that it does not
@@ -797,7 +881,7 @@ mod verification {
     }
 
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(0)]
     fn verify_prepare_kick() {
         // Firecracker's virtio queue implementation is not completely spec conform:
         // According to the spec, we have to check whether to notify the driver after every call
@@ -837,7 +921,7 @@ mod verification {
     }
 
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(0)]
     fn verify_is_empty() {
         let ProofContext(queue, mem) = ProofContext::bounded_queue();
 
@@ -845,7 +929,7 @@ mod verification {
     }
 
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(0)]
     #[kani::solver(cadical)]
     fn verify_is_valid() {
         let ProofContext(queue, mem) = kani::any();
@@ -872,7 +956,7 @@ mod verification {
     }
 
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(0)]
     fn verify_actual_size() {
         let ProofContext(queue, _) = kani::any();
 
@@ -881,7 +965,7 @@ mod verification {
     }
 
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(0)]
     fn verify_set_avail_event() {
         let ProofContext(mut queue, mem) = ProofContext::bounded_queue();
 
@@ -889,7 +973,7 @@ mod verification {
     }
 
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(0)]
     #[kani::solver(cadical)]
     fn verify_pop() {
         let ProofContext(mut queue, mem) = ProofContext::bounded_queue();
@@ -912,7 +996,7 @@ mod verification {
     }
 
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(0)]
     #[kani::solver(cadical)]
     fn verify_undo_pop() {
         let ProofContext(mut queue, mem) = ProofContext::bounded_queue();
@@ -930,7 +1014,8 @@ mod verification {
     }
 
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(0)]
+    #[kani::stub(Queue::set_avail_event, stubs::set_avail_event)]
     fn verify_try_enable_notification() {
         let ProofContext(mut queue, mem) = ProofContext::bounded_queue();
 
@@ -946,7 +1031,7 @@ mod verification {
     }
 
     #[kani::proof]
-    #[kani::unwind(2)]
+    #[kani::unwind(0)]
     #[kani::solver(cadical)]
     fn verify_checked_new() {
         let ProofContext(queue, mem) = ProofContext::bounded_queue();
