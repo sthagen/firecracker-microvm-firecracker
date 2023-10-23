@@ -1,8 +1,6 @@
 # Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Pytest fixtures and redefined-outer-name don't mix well. Disable it.
-# pylint:disable=redefined-outer-name
 # We import some fixtures that are unused. Disable that too.
 # pylint:disable=unused-import
 
@@ -401,6 +399,15 @@ def uvm_nano(uvm_plain):
 def artifact_dir():
     """Return the location of the CI artifacts"""
     return defs.ARTIFACT_DIR
+
+
+@pytest.fixture
+def uvm_plain_any(microvm_factory, guest_kernel, rootfs_ubuntu_22):
+    """All guest kernels
+    kernel: all
+    rootfs: Ubuntu 22.04
+    """
+    return microvm_factory.build(guest_kernel, rootfs_ubuntu_22)
 
 
 @pytest.fixture

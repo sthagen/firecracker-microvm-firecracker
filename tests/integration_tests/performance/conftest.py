@@ -1,9 +1,6 @@
 # Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Pytest fixtures and redefined-outer-name don't mix well. Disable it.
-# pylint:disable=redefined-outer-name
-
 """Fixtures for performance tests"""
 
 import json
@@ -87,6 +84,12 @@ def st_core(metrics, results_file_dumper, guest_kernel, rootfs, request):
     stats = core.Core()
     guest_kernel_ver = guest_kernel.stem[2:]
     stats.check_baseline = request.config.getoption("--perf-fail")
+
+    # We want to run the 6.1 guest if possible, but not check it against a
+    # baseline
+    if guest_kernel_ver == "6.1":
+        stats.check_baseline = False
+
     stats.env_id_prefix = f"{guest_kernel_ver}/{rootfs.name}"
     stats.iterations = 1
     stats.custom = {
