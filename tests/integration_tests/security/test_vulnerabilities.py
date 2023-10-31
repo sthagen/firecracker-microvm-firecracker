@@ -56,7 +56,9 @@ def configure_microvm(
     microvm.basic_config(vcpu_count=2, mem_size_mib=256, cpu_template=cpu_template)
     if custom_cpu_template:
         microvm.api.cpu_config.put(**custom_cpu_template["template"])
-    microvm.cpu_template = cpu_template or custom_cpu_template
+    microvm.cpu_template = cpu_template
+    if cpu_template is None and custom_cpu_template is not None:
+        microvm.cpu_template = custom_cpu_template["name"]
     microvm.add_net_iface()
     microvm.start()
     return microvm
@@ -178,6 +180,7 @@ def test_spectre_meltdown_checker_on_host(spectre_meltdown_checker):
         comparator=set_did_not_grow_comparator(
             spectre_meltdown_reported_vulnerablities
         ),
+        ignore_return_code=True,
     )
 
 
