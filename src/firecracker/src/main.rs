@@ -76,17 +76,15 @@ enum ResizeFdTableError {
     Close(io::Error),
 }
 
-impl From<MainError> for ExitCode {
+impl From<MainError> for FcExitCode {
     fn from(value: MainError) -> Self {
-        let exit_code = match value {
+        match value {
             MainError::ParseArguments(_) => FcExitCode::ArgParsing,
             MainError::InvalidLogLevel(_) => FcExitCode::BadConfiguration,
             MainError::RunWithApi(ApiServerError::MicroVMStoppedWithError(code)) => code,
             MainError::RunWithoutApiError(RunWithoutApiError::Shutdown(code)) => code,
             _ => FcExitCode::GenericError,
-        };
-
-        ExitCode::from(exit_code as u8)
+        }
     }
 }
 
@@ -95,9 +93,11 @@ fn main() -> ExitCode {
     if let Err(err) = result {
         error!("{err}");
         eprintln!("Error: {err:?}");
-        ExitCode::from(err)
+        let exit_code = FcExitCode::from(err) as u8;
+        error!("Firecracker exiting with error. exit_code={exit_code}");
+        ExitCode::from(exit_code)
     } else {
-        info!("Firecracker exited successfully");
+        info!("Firecracker exiting successfully. exit_code=0");
         ExitCode::SUCCESS
     }
 }
