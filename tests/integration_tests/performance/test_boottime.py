@@ -165,6 +165,7 @@ def find_events(log_data):
     "vcpu_count,mem_size_mib",
     [(1, 128), (1, 1024), (2, 2048), (4, 4096)],
 )
+@pytest.mark.nonci
 def test_boottime(
     microvm_factory, guest_kernel, rootfs, vcpu_count, mem_size_mib, metrics
 ):
@@ -173,6 +174,7 @@ def test_boottime(
     metrics.set_dimensions(
         {
             **DIMENSIONS,
+            "performance_test": "test_boottime",
             "guest_kernel": guest_kernel.name,
             "vcpus": str(vcpu_count),
             "mem_size_mib": str(mem_size_mib),
