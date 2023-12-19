@@ -57,10 +57,10 @@ pub enum GetMaxCpusPerPackageError {
 }
 
 /// Error type for setting leaf b section of `IntelCpuid::normalize`.
+#[rustfmt::skip]
 #[derive(Debug, thiserror::Error, displaydoc::Display, Eq, PartialEq)]
 pub enum ExtendedTopologyError {
-    #[rustfmt::skip]
-    #[doc = "Failed to set `Number of bits to shift right on x2APIC ID to get a unique topology ID of the next level type`: {0}"]
+    /// Failed to set `Number of bits to shift right on x2APIC ID to get a unique topology ID of the next level type`: {0}
     ApicId(CheckedAssignError),
     /// Failed to set `Number of logical processors at this level type`: {0}
     LogicalProcessors(CheckedAssignError),
@@ -583,7 +583,7 @@ mod tests {
             cpu_bits,
             cpus_per_core,
         );
-        assert!(result.is_ok());
+        result.unwrap();
         assert!(intel_cpuid.inner().contains_key(&CpuidKey {
             leaf: 0xb,
             subleaf: 0x1
@@ -607,7 +607,7 @@ mod tests {
         )])));
         let result =
             amd_cpuid.update_extended_topology_entry(cpu_index, cpu_count, cpu_bits, cpus_per_core);
-        assert!(result.is_ok());
+        result.unwrap();
         assert!(amd_cpuid.inner().contains_key(&CpuidKey {
             leaf: 0xb,
             subleaf: 0x1
