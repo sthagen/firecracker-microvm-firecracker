@@ -7,11 +7,11 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::{mem, ptr};
+use std::os::unix::net::UnixStream;
+use std::ptr;
 
-use serde::Deserialize;
-use userfaultfd::Uffd;
+use serde::{Deserialize, Serialize};
+use userfaultfd::{Error, Event, Uffd};
 use utils::get_page_size;
 use utils::sock_ctrl_msg::ScmSocket;
 
@@ -22,7 +22,7 @@ use utils::sock_ctrl_msg::ScmSocket;
 ///
 /// E.g. Guest memory contents for a region of `size` bytes can be found in the backend
 /// at `offset` bytes from the beginning, and should be copied/populated into `base_host_address`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GuestRegionUffdMapping {
     /// Base host virtual address where the guest memory contents for this region
     /// should be copied/populated.
@@ -33,22 +33,6 @@ pub struct GuestRegionUffdMapping {
     pub offset: u64,
 }
 
-#[derive(Debug)]
-struct MemRegion {
-    mapping: GuestRegionUffdMapping,
-    page_states: HashMap<u64, MemPageState>,
-}
-
-#[derive(Debug)]
-pub struct UffdPfHandler {
-    mem_regions: Vec<MemRegion>,
-    backing_buffer: *const u8,
-    pub uffd: Uffd,
-    // Not currently used but included to demonstrate how a page fault handler can
-    // fetch Firecracker's PID in order to make it aware of any crashes/exits.
-    _firecracker_pid: u32,
-}
-
 #[derive(Debug, Clone)]
 pub enum MemPageState {
     Uninitialized,
@@ -57,8 +41,21 @@ pub enum MemPageState {
     Anonymous,
 }
 
-impl UffdPfHandler {
-    pub fn from_unix_stream(stream: UnixStream, data: *const u8, size: usize) -> Self {
+#[derive(Debug)]
+struct MemRegion {
+    mapping: GuestRegionUffdMapping,
+    page_states: HashMap<u64, MemPageState>,
+}
+
+#[derive(Debug)]
+pub struct UffdHandler {
+    mem_regions: Vec<MemRegion>,
+    backing_buffer: *const u8,
+    uffd: Uffd,
+}
+
+impl UffdHandler {
+    pub fn from_unix_stream(stream: &UnixStream, backing_buffer: *const u8, size: usize) -> Self {
         let mut message_buf = vec![0u8; 1024];
         let (bytes_read, file) = stream
             .recv_with_fd(&mut message_buf[..])
@@ -77,16 +74,17 @@ impl UffdPfHandler {
 
         let uffd = unsafe { Uffd::from_raw_fd(file.into_raw_fd()) };
 
-        let creds: libc::ucred = get_peer_process_credentials(stream);
-
         let mem_regions = create_mem_regions(&mappings);
 
         Self {
             mem_regions,
-            backing_buffer: data,
+            backing_buffer,
             uffd,
-            _firecracker_pid: creds.pid as u32,
         }
+    }
+
+    pub fn read_event(&mut self) -> Result<Option<Event>, Error> {
+        self.uffd.read_event()
     }
 
     pub fn update_mem_state_mappings(&mut self, start: u64, end: u64, state: &MemPageState) {
@@ -97,36 +95,6 @@ impl UffdPfHandler {
                 }
             }
         }
-    }
-
-    fn populate_from_file(&self, region: &MemRegion, dst: u64, len: usize) -> (u64, u64) {
-        let offset = dst - region.mapping.base_host_virt_addr;
-        let src = self.backing_buffer as u64 + region.mapping.offset + offset;
-
-        let ret = unsafe {
-            self.uffd
-                .copy(src as *const _, dst as *mut _, len, true)
-                .expect("Uffd copy failed")
-        };
-
-        // Make sure the UFFD copied some bytes.
-        assert!(ret > 0);
-
-        (dst, dst + len as u64)
-    }
-
-    fn zero_out(&mut self, addr: u64) -> (u64, u64) {
-        let page_size = get_page_size().unwrap();
-
-        let ret = unsafe {
-            self.uffd
-                .zeropage(addr as *mut _, page_size, true)
-                .expect("Uffd zeropage failed")
-        };
-        // Make sure the UFFD zeroed out some bytes.
-        assert!(ret > 0);
-
-        return (addr, addr + page_size as u64);
     }
 
     pub fn serve_pf(&mut self, addr: *mut u8, len: usize) {
@@ -157,9 +125,7 @@ impl UffdPfHandler {
                     self.update_mem_state_mappings(start, end, &MemPageState::Anonymous);
                     return;
                 }
-                None => {
-                    ();
-                }
+                None => {}
             }
         }
 
@@ -168,30 +134,140 @@ impl UffdPfHandler {
             addr
         );
     }
-}
 
-fn get_peer_process_credentials(stream: UnixStream) -> libc::ucred {
-    let mut creds: libc::ucred = libc::ucred {
-        pid: 0,
-        gid: 0,
-        uid: 0,
-    };
-    let mut creds_size = mem::size_of::<libc::ucred>() as u32;
+    fn populate_from_file(&self, region: &MemRegion, dst: u64, len: usize) -> (u64, u64) {
+        let offset = dst - region.mapping.base_host_virt_addr;
+        let src = self.backing_buffer as u64 + region.mapping.offset + offset;
 
-    let ret = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            &mut creds as *mut _ as *mut _,
-            &mut creds_size as *mut libc::socklen_t,
-        )
-    };
-    if ret != 0 {
-        panic!("Failed to get peer process credentials");
+        let ret = unsafe {
+            self.uffd
+                .copy(src as *const _, dst as *mut _, len, true)
+                .expect("Uffd copy failed")
+        };
+
+        // Make sure the UFFD copied some bytes.
+        assert!(ret > 0);
+
+        (dst, dst + len as u64)
     }
 
-    creds
+    fn zero_out(&mut self, addr: u64) -> (u64, u64) {
+        let page_size = get_page_size().unwrap();
+
+        let ret = unsafe {
+            self.uffd
+                .zeropage(addr as *mut _, page_size, true)
+                .expect("Uffd zeropage failed")
+        };
+        // Make sure the UFFD zeroed out some bytes.
+        assert!(ret > 0);
+
+        (addr, addr + page_size as u64)
+    }
+}
+
+#[derive(Debug)]
+pub struct Runtime {
+    stream: UnixStream,
+    backing_file: File,
+    backing_memory: *mut u8,
+    backing_memory_size: usize,
+    uffds: HashMap<i32, UffdHandler>,
+}
+
+impl Runtime {
+    pub fn new(stream: UnixStream, backing_file: File) -> Self {
+        let file_meta = backing_file
+            .metadata()
+            .expect("can not get backing file metadata");
+        let backing_memory_size = file_meta.len() as usize;
+        // # Safety:
+        // File size and fd are valid
+        let ret = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                backing_memory_size,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                backing_file.as_raw_fd(),
+                0,
+            )
+        };
+        if ret == libc::MAP_FAILED {
+            panic!("mmap on backing file failed");
+        }
+
+        Self {
+            stream,
+            backing_file,
+            backing_memory: ret.cast(),
+            backing_memory_size,
+            uffds: HashMap::default(),
+        }
+    }
+
+    /// Polls the `UnixStream` and UFFD fds in a loop.
+    /// When stream is polled, new uffd is retrieved.
+    /// When uffd is polled, page fault is handled by
+    /// calling `pf_event_dispatch` with corresponding
+    /// uffd object passed in.
+    pub fn run(&mut self, pf_event_dispatch: impl Fn(&mut UffdHandler)) {
+        let mut pollfds = vec![];
+
+        // Poll the stream for incoming uffds
+        pollfds.push(libc::pollfd {
+            fd: self.stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+
+        // We can skip polling on stream fd if
+        // the connection is closed.
+        let mut skip_stream: usize = 0;
+        loop {
+            let pollfd_ptr = pollfds[skip_stream..].as_mut_ptr();
+            let pollfd_size = pollfds[skip_stream..].len() as u64;
+
+            // # Safety:
+            // Pollfds vector is valid
+            let mut nready = unsafe { libc::poll(pollfd_ptr, pollfd_size, -1) };
+
+            if nready == -1 {
+                panic!("Could not poll for events!")
+            }
+
+            for i in skip_stream..pollfds.len() {
+                if nready == 0 {
+                    break;
+                }
+                if pollfds[i].revents & libc::POLLIN != 0 {
+                    nready -= 1;
+                    if pollfds[i].fd == self.stream.as_raw_fd() {
+                        // Handle new uffd from stream
+                        let handler = UffdHandler::from_unix_stream(
+                            &self.stream,
+                            self.backing_memory,
+                            self.backing_memory_size,
+                        );
+                        pollfds.push(libc::pollfd {
+                            fd: handler.uffd.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        });
+                        self.uffds.insert(handler.uffd.as_raw_fd(), handler);
+
+                        // If connection is closed, we can skip the socket from being polled.
+                        if pollfds[i].revents & (libc::POLLRDHUP | libc::POLLHUP) != 0 {
+                            skip_stream = 1;
+                        }
+                    } else {
+                        // Handle one of uffd page faults
+                        pf_event_dispatch(self.uffds.get_mut(&pollfds[i].fd).unwrap());
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn create_mem_regions(mappings: &Vec<GuestRegionUffdMapping>) -> Vec<MemRegion> {
@@ -217,33 +293,91 @@ fn create_mem_regions(mappings: &Vec<GuestRegionUffdMapping>) -> Vec<MemRegion> 
     mem_regions
 }
 
-pub fn create_pf_handler() -> UffdPfHandler {
-    let uffd_sock_path = std::env::args().nth(1).expect("No socket path given");
-    let mem_file_path = std::env::args().nth(2).expect("No memory file given");
+#[cfg(test)]
+mod tests {
+    use std::mem::MaybeUninit;
+    use std::os::unix::net::UnixListener;
 
-    let file = File::open(mem_file_path).expect("Cannot open memfile");
-    let size = file.metadata().unwrap().len() as usize;
+    use utils::tempdir::TempDir;
+    use utils::tempfile::TempFile;
 
-    // mmap a memory area used to bring in the faulting regions.
-    let ret = unsafe {
-        libc::mmap(
-            ptr::null_mut(),
-            size,
-            libc::PROT_READ,
-            libc::MAP_PRIVATE,
-            file.as_raw_fd(),
-            0,
-        )
-    };
-    if ret == libc::MAP_FAILED {
-        panic!("mmap failed");
+    use super::*;
+
+    unsafe impl Send for Runtime {}
+
+    #[test]
+    fn test_runtime() {
+        let tmp_dir = TempDir::new().unwrap();
+        let dummy_socket_path = tmp_dir.as_path().join("dummy_socket");
+        let dummy_socket_path_clone = dummy_socket_path.clone();
+
+        let mut uninit_runtime = Box::new(MaybeUninit::<Runtime>::uninit());
+        // We will use this pointer to bypass a bunch of Rust Safety
+        // for the sake of convenience.
+        let runtime_ptr = uninit_runtime.as_ptr() as *const Runtime;
+
+        let runtime_thread = std::thread::spawn(move || {
+            let tmp_file = TempFile::new().unwrap();
+            tmp_file.as_file().set_len(0x1000).unwrap();
+            let dummy_mem_path = tmp_file.as_path();
+
+            let file = File::open(dummy_mem_path).expect("Cannot open memfile");
+            let listener =
+                UnixListener::bind(dummy_socket_path).expect("Cannot bind to socket path");
+            let (stream, _) = listener.accept().expect("Cannot listen on UDS socket");
+            // Update runtime with actual runtime
+            let runtime = uninit_runtime.write(Runtime::new(stream, file));
+            runtime.run(|_: &mut UffdHandler| {});
+        });
+
+        // wait for runtime thread to initialize itself
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let stream =
+            UnixStream::connect(dummy_socket_path_clone).expect("Cannot connect to the socket");
+
+        let dummy_memory_region = vec![GuestRegionUffdMapping {
+            base_host_virt_addr: 0,
+            size: 0x1000,
+            offset: 0,
+        }];
+        let dummy_memory_region_json = serde_json::to_string(&dummy_memory_region).unwrap();
+
+        let dummy_file_1 = TempFile::new().unwrap();
+        let dummy_fd_1 = dummy_file_1.as_file().as_raw_fd();
+        stream
+            .send_with_fd(dummy_memory_region_json.as_bytes(), dummy_fd_1)
+            .unwrap();
+        // wait for the runtime thread to process message
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        unsafe {
+            assert_eq!((*runtime_ptr).uffds.len(), 1);
+        }
+
+        let dummy_file_2 = TempFile::new().unwrap();
+        let dummy_fd_2 = dummy_file_2.as_file().as_raw_fd();
+        stream
+            .send_with_fd(dummy_memory_region_json.as_bytes(), dummy_fd_2)
+            .unwrap();
+        // wait for the runtime thread to process message
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        unsafe {
+            assert_eq!((*runtime_ptr).uffds.len(), 2);
+        }
+
+        // there is no way to properly stop runtime, so
+        // we send a message with an incorrect memory region
+        // to cause runtime thread to panic
+        let error_memory_region = vec![GuestRegionUffdMapping {
+            base_host_virt_addr: 0,
+            size: 0,
+            offset: 0,
+        }];
+        let error_memory_region_json = serde_json::to_string(&error_memory_region).unwrap();
+        stream
+            .send_with_fd(error_memory_region_json.as_bytes(), dummy_fd_2)
+            .unwrap();
+
+        runtime_thread.join().unwrap_err();
     }
-    let memfile_buffer = ret as *const u8;
-
-    // Get Uffd from UDS. We'll use the uffd to handle PFs for Firecracker.
-    let listener = UnixListener::bind(&uffd_sock_path).expect("Cannot bind to socket path");
-
-    let (stream, _) = listener.accept().expect("Cannot listen on UDS socket");
-
-    UffdPfHandler::from_unix_stream(stream, memfile_buffer, size)
 }
