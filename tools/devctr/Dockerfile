@@ -73,14 +73,13 @@ RUN apt-get update \
         # needed for integration tests
         net-tools iproute2 iperf3 socat fdisk \
         numactl \
+        iptables \
         openssh-client \
         pkgconf \
         python3 python3-dev python3-pip \
         screen tmux \
         tzdata \
         tini \
-        # for mdl
-        ruby \
         # for cpu-template-helper
         # TODO: Remove `dmidecode` after the end of kernel 4.14 support.
         # https://github.com/firecracker-microvm/firecracker/issues/3677
@@ -94,8 +93,7 @@ RUN apt-get update \
         # for debugging
         gdb strace \
     && rm -rf /var/lib/apt/lists/* \
-    && pip3 install --upgrade pip poetry \
-    && gem install mdl
+    && pip3 install --upgrade pip poetry
 
 
 COPY tools/devctr /tmp/poetry
