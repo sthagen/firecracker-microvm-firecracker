@@ -109,7 +109,7 @@ def test_hugetlbfs_snapshot(
 
     # Spawn page fault handler process.
     _pf_handler = spawn_pf_handler(
-        vm, uffd_handler_paths["valid_2m_handler"], snapshot.mem
+        vm, uffd_handler_paths["valid_handler"], snapshot.mem
     )
 
     vm.restore_from_snapshot(snapshot, resume=True, uffd_path=SOCKET_PATH)
@@ -164,7 +164,7 @@ def test_hugetlbfs_diff_snapshot(microvm_factory, uvm_plain, uffd_handler_paths)
 
     # Spawn page fault handler process.
     _pf_handler = spawn_pf_handler(
-        vm, uffd_handler_paths["valid_2m_handler"], snapshot_merged.mem
+        vm, uffd_handler_paths["valid_handler"], snapshot_merged.mem
     )
 
     vm.restore_from_snapshot(snapshot_merged, resume=True, uffd_path=SOCKET_PATH)
@@ -246,11 +246,21 @@ def test_ept_violation_count(
         # Give the helper time to touch all its pages
         time.sleep(5)
 
-        _, ept_violations, _ = utils.run_cmd(
-            "cat /sys/kernel/tracing/trace | grep 'reason EPT_VIOLATION' | wc -l"
+        if global_props.cpu_architecture == "x86_64":
+            trace_entry = "reason EPT_VIOLATION"
+            metric = "ept_violations"
+        else:
+            # On ARM, KVM does not differentiate why it got a guest page fault.
+            # However, even in this slightly more general metric, we see a significant
+            # difference between 4K and 2M pages.
+            trace_entry = "guest_page_fault"
+            metric = "guest_page_faults"
+
+        _, metric_value, _ = utils.run_cmd(
+            f"cat /sys/kernel/tracing/trace | grep '{trace_entry}' | wc -l"
         )
 
-    metrics.put_metric("ept_violations", int(ept_violations), "Count")
+    metrics.put_metric(metric, int(metric_value), "Count")
 
 
 @pytest.mark.skipif(
