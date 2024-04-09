@@ -58,14 +58,27 @@ def kernels(glob) -> Iterator:
                 break
 
 
+def kernels_unfiltered(glob) -> Iterator:
+    """Return kernels from the CI artifacts. This one does not filter for
+    supported kernels. It will return any kernel in the CI artifacts folder
+    that matches the 'glob'
+    """
+    all_kernels = [r"vmlinux-\d.\d+.\d+", r"vmlinux-5.10-no-sve-bin"]
+    for kernel in sorted(ARTIFACT_DIR.rglob(glob)):
+        for kernel_regex in all_kernels:
+            if re.fullmatch(kernel_regex, kernel.name):
+                yield kernel
+                break
+
+
 def disks(glob) -> Iterator:
     """Return supported rootfs"""
     yield from sorted(ARTIFACT_DIR.glob(glob))
 
 
-def kernel_params(glob="vmlinux-*") -> Iterator:
+def kernel_params(glob="vmlinux-*", select=kernels) -> Iterator:
     """Return supported kernels"""
-    for kernel in kernels(glob):
+    for kernel in select(glob):
         yield pytest.param(kernel, id=kernel.name)
 
 
@@ -107,11 +120,11 @@ class FirecrackerArtifact:
     def snapshot_version_tuple(self):
         """Return the artifact's snapshot version as a tuple: `X.Y.0`."""
 
-        # Starting from Firecracker v1.6.0, snapshots have their own version that is
+        # Starting from Firecracker v1.7.0, snapshots have their own version that is
         # independent of Firecracker versions. For these Firecracker versions, use
         # the --snapshot-version Firecracker flag, to figure out which snapshot version
         # it supports.
-        # TODO: remove this check once all version prior to 1.6.0 go out of support.
+        # TODO: remove this check once all version up to (and including) 1.6.0 go out of support.
         if packaging.version.parse(self.version) < packaging.version.parse("1.7.0"):
             return self.version_tuple[:2] + (0,)
 
