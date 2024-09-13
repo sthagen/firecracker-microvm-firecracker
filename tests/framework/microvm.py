@@ -653,6 +653,8 @@ class Microvm:
         # and leave 0.2 delay between them.
         if "no-api" not in self.jailer.extra_args:
             self._wait_create()
+        if "config-file" in self.jailer.extra_args and self.iface:
+            self.wait_for_up()
         if self.log_file and log_level in ("Trace", "Debug", "Info"):
             self.check_log_message("Running Firecracker")
 
@@ -876,6 +878,9 @@ class Microvm:
         # Check that the VM has started
         assert self.state == "Running"
 
+        if self.iface:
+            self.wait_for_up()
+
     def pause(self):
         """Pauses the microVM"""
         self.api.vm.patch(state="Paused")
@@ -956,6 +961,9 @@ class Microvm:
             enable_diff_snapshots=snapshot.is_diff,
             resume_vm=resume,
         )
+        # This is not a "wait for boot", but rather a "VM still works after restoration"
+        if snapshot.net_ifaces and resume:
+            self.wait_for_up()
         return jailed_snapshot
 
     def enable_entropy_device(self):
