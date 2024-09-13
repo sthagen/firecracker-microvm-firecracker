@@ -18,6 +18,11 @@ and this project adheres to
 
 ### Fixed
 
+- [#4796](https://github.com/firecracker-microvm/firecracker/pull/4796): Fixed
+  Vsock not notifying guest about `TRANSPORT_RESET_EVENT` event after snapshot
+  restore. This resulted in guest waiting indefinitely on a connection which was
+  reset during snapshot creation.
+
 ## \[1.9.0\]
 
 ### Added
@@ -812,7 +817,9 @@ and this project adheres to
   `--show-level` and `--show-log-origin` that can be used for configuring the
   Logger when starting the process. When using this method for configuration,
   only `--log-path` is mandatory.
-- Added a [guide](docs/devctr-image.md) for updating the dev container image.
+- Added a
+  [guide](https://github.com/firecracker-microvm/firecracker/blob/v0.22.0/docs/devctr-image.md)
+  for updating the dev container image.
 - Added a new API call, `PUT /mmds/config`, for configuring the `MMDS` with a
   custom valid link-local IPv4 address.
 - Added experimental JSON response format support for MMDS guest applications
