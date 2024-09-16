@@ -16,13 +16,13 @@ use kvm_ioctls::VcpuExit;
 use libc::{c_int, c_void, siginfo_t};
 use log::{error, info, warn};
 use seccompiler::{BpfProgram, BpfProgramRef};
-use utils::errno;
-use utils::eventfd::EventFd;
-use utils::signal::{register_signal_handler, sigrtmin, Killable};
-use utils::sm::StateMachine;
+use vmm_sys_util::errno;
+use vmm_sys_util::eventfd::EventFd;
 
 use crate::cpu_config::templates::{CpuConfiguration, GuestConfigError};
 use crate::logger::{IncMetric, METRICS};
+use crate::utils::signal::{register_signal_handler, sigrtmin, Killable};
+use crate::utils::sm::StateMachine;
 use crate::vstate::vm::Vm;
 use crate::FcExitCode;
 
@@ -49,7 +49,7 @@ pub enum VcpuError {
     /// Received error signaling kvm exit: {0}
     FaultyKvmExit(String),
     /// Failed to signal vcpu: {0}
-    SignalVcpu(utils::errno::Error),
+    SignalVcpu(vmm_sys_util::errno::Error),
     /// Unexpected kvm exit received: {0}
     UnhandledKvmExit(String),
     /// Failed to run action on vcpu: {0}
@@ -620,7 +620,7 @@ pub struct VcpuHandle {
 /// Error type for [`VcpuHandle::send_event`].
 #[derive(Debug, derive_more::From, thiserror::Error)]
 #[error("Failed to signal vCPU: {0}")]
-pub struct VcpuSendEventError(pub utils::errno::Error);
+pub struct VcpuSendEventError(pub vmm_sys_util::errno::Error);
 
 impl VcpuHandle {
     /// Creates a new [`VcpuHandle`].
@@ -699,14 +699,14 @@ pub mod tests {
     use std::sync::{Arc, Barrier, Mutex};
 
     use linux_loader::loader::KernelLoader;
-    use utils::errno;
-    use utils::signal::validate_signal_num;
+    use vmm_sys_util::errno;
 
     use super::*;
     use crate::builder::StartMicrovmError;
     use crate::devices::bus::DummyDevice;
     use crate::devices::BusDevice;
     use crate::seccomp_filters::get_empty_filters;
+    use crate::utils::signal::validate_signal_num;
     use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
     use crate::vstate::vcpu::VcpuError as EmulationError;
     use crate::vstate::vm::tests::setup_vm;
@@ -877,9 +877,9 @@ pub mod tests {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
         #[cfg(target_arch = "x86_64")]
-        path.push("src/utilities/mock_resources/test_elf.bin");
+        path.push("src/test_utils/mock_resources/test_elf.bin");
         #[cfg(target_arch = "aarch64")]
-        path.push("src/utilities/mock_resources/test_pe.bin");
+        path.push("src/test_utils/mock_resources/test_pe.bin");
 
         let mut kernel_file = File::open(path).expect("Cannot open kernel file");
 
@@ -898,7 +898,7 @@ pub mod tests {
         entry_addr.unwrap().kernel_load
     }
 
-    fn vcpu_configured_for_boot() -> (VcpuHandle, utils::eventfd::EventFd) {
+    fn vcpu_configured_for_boot() -> (VcpuHandle, vmm_sys_util::eventfd::EventFd) {
         Vcpu::register_kick_signal_handler();
         // Need enough mem to boot linux.
         let mem_size = 64 << 20;

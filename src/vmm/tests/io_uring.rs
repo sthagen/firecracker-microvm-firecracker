@@ -6,11 +6,11 @@ use std::os::unix::io::AsRawFd;
 use std::thread;
 use std::time::Duration;
 
-use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
-use utils::eventfd::EventFd;
-use utils::tempfile::TempFile;
 use vm_memory::VolatileMemory;
 use vmm::vstate::memory::{Bytes, MmapRegion};
+use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
+use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::tempfile::TempFile;
 
 mod test_utils {
     use vm_memory::VolatileMemory;

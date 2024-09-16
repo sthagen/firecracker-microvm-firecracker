@@ -6,9 +6,9 @@ use aws_lc_rs::error::Unspecified as RandError;
 use aws_lc_rs::rand;
 use log::{debug, error};
 use serde::{Deserialize, Serialize};
-use utils::eventfd::EventFd;
 use vm_memory::{GuestAddress, GuestMemoryError};
 use vm_superio::Trigger;
+use vmm_sys_util::eventfd::EventFd;
 
 use super::super::legacy::EventFdTrigger;
 use crate::device_manager::resources::ResourceAllocator;

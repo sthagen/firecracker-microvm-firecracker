@@ -8,7 +8,7 @@ use std::thread;
 #[cfg(test)]
 use std::time::Duration;
 
-use utils::tempfile::TempFile;
+use vmm_sys_util::tempfile::TempFile;
 
 use super::device::VirtioBlockConfig;
 use super::RequestHeader;

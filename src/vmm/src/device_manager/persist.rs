@@ -652,7 +652,7 @@ impl<'a> Persist<'a> for MMIODeviceManager {
 
 #[cfg(test)]
 mod tests {
-    use utils::tempfile::TempFile;
+    use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
     use crate::builder::tests::*;

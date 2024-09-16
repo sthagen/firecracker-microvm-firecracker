@@ -6,8 +6,8 @@ use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 use aws_lc_rs::rand;
-use utils::eventfd::EventFd;
 use vm_memory::GuestMemoryError;
+use vmm_sys_util::eventfd::EventFd;
 
 use super::metrics::METRICS;
 use super::{RNG_NUM_QUEUES, RNG_QUEUE};

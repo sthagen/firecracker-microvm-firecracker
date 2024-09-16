@@ -12,7 +12,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use vm_memory::GuestAddress;
 use vmm::devices::virtio::queue::{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
 use vmm::devices::virtio::test_utils::VirtQueue;
-use vmm::utilities::test_utils::single_region_mem;
+use vmm::test_utils::single_region_mem;
 
 /// Create one chain with n descriptors
 /// Descriptor buffers will leave at the offset of 2048 bytes
@@ -64,7 +64,7 @@ pub fn queue_benchmark(c: &mut Criterion) {
     let desc = queue.pop().unwrap();
     c.bench_function("next_descriptor_1", |b| {
         b.iter(|| {
-            let mut head = Some(desc.clone());
+            let mut head = Some(desc);
             while let Some(d) = head {
                 head = std::hint::black_box(d.next_descriptor());
             }
@@ -76,7 +76,7 @@ pub fn queue_benchmark(c: &mut Criterion) {
     let desc = queue.pop().unwrap();
     c.bench_function("next_descriptor_2", |b| {
         b.iter(|| {
-            let mut head = Some(desc.clone());
+            let mut head = Some(desc);
             while let Some(d) = head {
                 head = std::hint::black_box(d.next_descriptor());
             }
@@ -88,7 +88,7 @@ pub fn queue_benchmark(c: &mut Criterion) {
     let desc = queue.pop().unwrap();
     c.bench_function("next_descriptor_4", |b| {
         b.iter(|| {
-            let mut head = Some(desc.clone());
+            let mut head = Some(desc);
             while let Some(d) = head {
                 head = std::hint::black_box(d.next_descriptor());
             }
@@ -100,7 +100,7 @@ pub fn queue_benchmark(c: &mut Criterion) {
     let desc = queue.pop().unwrap();
     c.bench_function("next_descriptor_16", |b| {
         b.iter(|| {
-            let mut head = Some(desc.clone());
+            let mut head = Some(desc);
             while let Some(d) = head {
                 head = std::hint::black_box(d.next_descriptor());
             }

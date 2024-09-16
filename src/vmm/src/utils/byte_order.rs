@@ -3,6 +3,7 @@
 
 macro_rules! generate_read_fn {
     ($fn_name: ident, $data_type: ty, $byte_type: ty, $type_size: expr, $endian_type: ident) => {
+        /// Read bytes from the slice
         pub fn $fn_name(input: &[$byte_type]) -> $data_type {
             assert!($type_size == std::mem::size_of::<$data_type>());
             let mut array = [0u8; $type_size];
@@ -18,6 +19,7 @@ macro_rules! generate_read_fn {
 
 macro_rules! generate_write_fn {
     ($fn_name: ident, $data_type: ty, $byte_type: ty, $endian_type: ident) => {
+        /// Write bytes to the slice
         pub fn $fn_name(buf: &mut [$byte_type], n: $data_type) {
             #[allow(clippy::cast_sign_loss)]
             #[allow(clippy::cast_possible_wrap)]

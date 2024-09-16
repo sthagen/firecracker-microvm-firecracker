@@ -4,13 +4,6 @@
 use std::net::Ipv4Addr;
 
 /// Checks if an IPv4 address is RFC 3927 compliant.
-/// # Examples
-///
-/// ```
-/// use std::net::Ipv4Addr;
-/// use utils::net::ipv4addr::is_link_local_valid;
-///
-/// is_link_local_valid(Ipv4Addr::new(169, 254, 1, 1));
 pub fn is_link_local_valid(ipv4_addr: Ipv4Addr) -> bool {
     match ipv4_addr.octets() {
         [169, 254, 0, _] => false,
@@ -24,7 +17,7 @@ pub fn is_link_local_valid(ipv4_addr: Ipv4Addr) -> bool {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use crate::net::ipv4addr::is_link_local_valid;
+    use super::*;
 
     #[test]
     fn test_is_link_local_valid() {

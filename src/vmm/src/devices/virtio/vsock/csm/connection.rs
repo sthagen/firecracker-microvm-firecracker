@@ -83,10 +83,9 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
-use utils::epoll::EventSet;
-use utils::wrap_usize_to_u32;
 use vm_memory::io::{ReadVolatile, WriteVolatile};
 use vm_memory::GuestMemoryError;
+use vmm_sys_util::epoll::EventSet;
 
 use super::super::defs::uapi;
 use super::super::packet::VsockPacket;
@@ -95,6 +94,7 @@ use super::txbuf::TxBuf;
 use super::{defs, ConnState, PendingRx, PendingRxSet, VsockCsmError};
 use crate::devices::virtio::vsock::metrics::METRICS;
 use crate::logger::IncMetric;
+use crate::utils::wrap_usize_to_u32;
 
 /// Trait that vsock connection backends need to implement.
 ///
@@ -684,8 +684,8 @@ mod tests {
     use std::os::unix::io::RawFd;
     use std::time::{Duration, Instant};
 
-    use utils::eventfd::EventFd;
     use vm_memory::{VolatileMemoryError, VolatileSlice};
+    use vmm_sys_util::eventfd::EventFd;
 
     use super::super::super::defs::uapi;
     use super::super::defs as csm_defs;

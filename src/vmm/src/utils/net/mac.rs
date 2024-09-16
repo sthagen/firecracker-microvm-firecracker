@@ -58,14 +58,6 @@ impl FromStr for MacAddr {
     /// # Arguments
     ///
     /// * `s` - reference that can be converted to &str.
-    /// # Example
-    ///
-    /// ```
-    /// use std::str::FromStr;
-    ///
-    /// use self::utils::net::mac::MacAddr;
-    /// MacAddr::from_str("12:34:56:78:9a:BC").unwrap();
-    /// ```
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let v: Vec<&str> = s.split(':').collect();
         let mut bytes = [0u8; MAC_ADDR_LEN as usize];
@@ -91,13 +83,6 @@ impl MacAddr {
     /// # Arguments
     ///
     /// * `src` - slice from which to copy MAC address content.
-    /// # Example
-    ///
-    /// ```
-    /// use self::utils::net::mac::MacAddr;
-    /// let mac = MacAddr::from_bytes_unchecked(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
-    /// println!("{}", mac.to_string());
-    /// ```
     #[inline]
     pub fn from_bytes_unchecked(src: &[u8]) -> MacAddr {
         // TODO: using something like std::mem::uninitialized could avoid the extra initialization,
@@ -109,13 +94,6 @@ impl MacAddr {
     }
 
     /// Return the underlying content of this `MacAddr` in bytes.
-    /// # Example
-    ///
-    /// ```
-    /// use self::utils::net::mac::MacAddr;
-    /// let mac = MacAddr::from([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
-    /// assert_eq!([0x01, 0x02, 0x03, 0x04, 0x05, 0x06], mac.get_bytes());
-    /// ```
     #[inline]
     pub fn get_bytes(&self) -> &[u8] {
         &self.bytes

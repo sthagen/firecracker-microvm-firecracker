@@ -6,14 +6,11 @@
 use std::fs::File;
 use std::mem;
 use std::os::raw::c_ulong;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-
-use utils::net::mac::MacAddr;
 
 #[cfg(test)]
 use crate::devices::virtio::net::device::vnet_hdr_len;
@@ -25,6 +22,7 @@ use crate::devices::DeviceError;
 use crate::mmds::data_store::Mmds;
 use crate::mmds::ns::MmdsNetworkStack;
 use crate::rate_limiter::RateLimiter;
+use crate::utils::net::mac::MacAddr;
 use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
 
 static NEXT_INDEX: AtomicUsize = AtomicUsize::new(1);
@@ -75,56 +73,6 @@ pub fn default_net_no_mmds() -> Net {
     enable(&net.tap);
 
     net
-}
-
-#[derive(Debug)]
-pub enum ReadTapMock {
-    Failure,
-    MockFrame(Vec<u8>),
-    TapFrame,
-}
-
-impl ReadTapMock {
-    pub fn mock_frame(&self) -> Vec<u8> {
-        if let ReadTapMock::MockFrame(frame) = self {
-            return frame.clone();
-        }
-        panic!("Can't get last mock frame");
-    }
-}
-
-#[derive(Debug)]
-pub enum WriteTapMock {
-    Failure,
-    Success,
-}
-
-// Used to simulate tap read and write fails in tests.
-#[derive(Debug)]
-pub struct Mocks {
-    pub(crate) read_tap: ReadTapMock,
-    pub(crate) write_tap: WriteTapMock,
-}
-
-impl Mocks {
-    pub fn set_read_tap(&mut self, read_tap: ReadTapMock) {
-        self.read_tap = read_tap;
-    }
-
-    pub fn set_write_tap(&mut self, write_tap: WriteTapMock) {
-        self.write_tap = write_tap;
-    }
-}
-
-impl Default for Mocks {
-    fn default() -> Mocks {
-        Mocks {
-            read_tap: ReadTapMock::MockFrame(
-                utils::rand::rand_alphanumerics(1234).as_bytes().to_vec(),
-            ),
-            write_tap: WriteTapMock::Success,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -298,9 +246,11 @@ pub fn enable(tap: &Tap) {
 
 #[cfg(test)]
 pub(crate) fn inject_tap_tx_frame(net: &Net, len: usize) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
     assert!(len >= vnet_hdr_len());
     let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&net.tap));
-    let mut frame = utils::rand::rand_alphanumerics(len - vnet_hdr_len())
+    let mut frame = vmm_sys_util::rand::rand_alphanumerics(len - vnet_hdr_len())
         .as_bytes()
         .to_vec();
     tap_traffic_simulator.push_tx_packet(&frame);
@@ -349,7 +299,7 @@ pub mod test {
     #![allow(clippy::undocumented_unsafe_blocks)]
     use std::os::unix::ffi::OsStrExt;
     use std::sync::{Arc, Mutex, MutexGuard};
-    use std::{cmp, fmt, mem};
+    use std::{cmp, fmt};
 
     use event_manager::{EventManager, SubscriberId, SubscriberOps};
 
@@ -358,20 +308,19 @@ pub mod test {
     use crate::devices::virtio::net::device::vnet_hdr_len;
     use crate::devices::virtio::net::gen::ETH_HLEN;
     use crate::devices::virtio::net::test_utils::{
-        assign_queues, default_net, inject_tap_tx_frame, NetEvent, NetQueue, ReadTapMock,
+        assign_queues, default_net, inject_tap_tx_frame, NetEvent, NetQueue,
     };
-    use crate::devices::virtio::net::{Net, MAX_BUFFER_SIZE, RX_INDEX, TX_INDEX};
+    use crate::devices::virtio::net::{Net, RX_INDEX, TX_INDEX};
     use crate::devices::virtio::queue::{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
     use crate::devices::virtio::test_utils::{VirtQueue, VirtqDesc};
     use crate::logger::IncMetric;
-    use crate::utilities::test_utils::single_region_mem;
     use crate::vstate::memory::{Address, Bytes, GuestAddress, GuestMemoryMmap};
 
     pub struct TestHelper<'a> {
         pub event_manager: EventManager<Arc<Mutex<Net>>>,
         pub subscriber_id: SubscriberId,
         pub net: Arc<Mutex<Net>>,
-        pub mem: GuestMemoryMmap,
+        pub mem: &'a GuestMemoryMmap,
         pub rxq: VirtQueue<'a>,
         pub txq: VirtQueue<'a>,
     }
@@ -392,18 +341,14 @@ pub mod test {
     impl<'a> TestHelper<'a> {
         const QUEUE_SIZE: u16 = 16;
 
-        pub fn get_default() -> TestHelper<'a> {
+        pub fn get_default(mem: &'a GuestMemoryMmap) -> TestHelper<'a> {
             let mut event_manager = EventManager::new().unwrap();
             let mut net = default_net();
-            let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
 
-            // transmute mem_ref lifetime to 'a
-            let mem_ref = unsafe { mem::transmute::<&GuestMemoryMmap, &'a GuestMemoryMmap>(&mem) };
-
-            let rxq = VirtQueue::new(GuestAddress(0), mem_ref, Self::QUEUE_SIZE);
+            let rxq = VirtQueue::new(GuestAddress(0), mem, Self::QUEUE_SIZE);
             let txq = VirtQueue::new(
                 rxq.end().unchecked_align_up(VirtqDesc::ALIGNMENT),
-                mem_ref,
+                mem,
                 Self::QUEUE_SIZE,
             );
             assign_queues(&mut net, rxq.create_queue(), txq.create_queue());
@@ -473,7 +418,7 @@ pub mod test {
                 addr += u64::from(len);
                 // Add small random gaps between descriptor addresses in order to make sure we
                 // don't blindly read contiguous memory.
-                addr += u64::from(utils::rand::xor_pseudo_rng_u32()) % 10;
+                addr += u64::from(vmm_sys_util::rand::xor_pseudo_rng_u32()) % 10;
             }
 
             // Mark the chain as available.
@@ -487,7 +432,6 @@ pub mod test {
 
         /// Generate a tap frame of `frame_len` and check that it is deferred
         pub fn check_rx_deferred_frame(&mut self, frame_len: usize) -> Vec<u8> {
-            self.net().tap.mocks.set_read_tap(ReadTapMock::TapFrame);
             let used_idx = self.rxq.used.idx.get();
 
             // Inject frame to tap and run epoll.
@@ -536,7 +480,7 @@ pub mod test {
         // Generates a frame of `frame_len` and writes it to the provided descriptor chain.
         // Doesn't generate an error if the descriptor chain is longer than `frame_len`.
         pub fn write_tx_frame(&self, desc_list: &[(u16, u32, u16)], frame_len: usize) -> Vec<u8> {
-            let mut frame = utils::rand::rand_alphanumerics(frame_len)
+            let mut frame = vmm_sys_util::rand::rand_alphanumerics(frame_len)
                 .as_bytes()
                 .to_vec();
             let prefix_len = vnet_hdr_len() + ETH_HLEN as usize;

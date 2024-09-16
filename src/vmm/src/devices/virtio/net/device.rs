@@ -5,7 +5,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-#[cfg(not(test))]
 use std::io::Read;
 use std::mem;
 use std::net::Ipv4Addr;
@@ -13,10 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use libc::EAGAIN;
 use log::{error, warn};
-use utils::eventfd::EventFd;
-use utils::net::mac::MacAddr;
-use utils::u64_to_usize;
 use vm_memory::GuestMemoryError;
+use vmm_sys_util::eventfd::EventFd;
 
 use crate::devices::virtio::device::{DeviceState, IrqTrigger, IrqType, VirtioDevice};
 use crate::devices::virtio::gen::virtio_blk::VIRTIO_F_VERSION_1;
@@ -41,6 +38,8 @@ use crate::logger::{IncMetric, METRICS};
 use crate::mmds::data_store::Mmds;
 use crate::mmds::ns::MmdsNetworkStack;
 use crate::rate_limiter::{BucketUpdate, RateLimiter, TokenType};
+use crate::utils::net::mac::MacAddr;
+use crate::utils::u64_to_usize;
 use crate::vstate::memory::{ByteValued, Bytes, GuestMemoryMmap};
 
 const FRAME_HEADER_MAX_LEN: usize = PAYLOAD_OFFSET + ETH_IPV4_FRAME_LEN;
@@ -716,12 +715,10 @@ impl Net {
         self.tx_rate_limiter.update_buckets(tx_bytes, tx_ops);
     }
 
-    #[cfg(not(test))]
     fn read_tap(&mut self) -> std::io::Result<usize> {
         self.tap.read(&mut self.rx_frame_buf)
     }
 
-    #[cfg(not(test))]
     fn write_tap(tap: &mut Tap, buf: &IoVecBuffer) -> std::io::Result<usize> {
         tap.write_iovec(buf)
     }
@@ -932,13 +929,11 @@ impl VirtioDevice for Net {
 #[cfg(test)]
 #[macro_use]
 pub mod tests {
-    use std::io::Read;
     use std::net::Ipv4Addr;
+    use std::os::fd::AsRawFd;
     use std::str::FromStr;
     use std::time::Duration;
-    use std::{io, mem, thread};
-
-    use utils::net::mac::{MacAddr, MAC_ADDR_LEN};
+    use std::{mem, thread};
 
     use super::*;
     use crate::check_metric_after_block;
@@ -949,8 +944,8 @@ pub mod tests {
     };
     use crate::devices::virtio::net::test_utils::test::TestHelper;
     use crate::devices::virtio::net::test_utils::{
-        default_net, if_index, inject_tap_tx_frame, set_mac, NetEvent, NetQueue, ReadTapMock,
-        TapTrafficSimulator, WriteTapMock,
+        default_net, if_index, inject_tap_tx_frame, set_mac, NetEvent, NetQueue,
+        TapTrafficSimulator,
     };
     use crate::devices::virtio::net::NET_QUEUE_SIZES;
     use crate::devices::virtio::queue::VIRTQ_DESC_F_WRITE;
@@ -959,33 +954,9 @@ pub mod tests {
     use crate::dumbo::EthernetFrame;
     use crate::logger::IncMetric;
     use crate::rate_limiter::{BucketUpdate, RateLimiter, TokenBucket, TokenType};
+    use crate::test_utils::single_region_mem;
+    use crate::utils::net::mac::{MacAddr, MAC_ADDR_LEN};
     use crate::vstate::memory::{Address, GuestMemory};
-
-    impl Net {
-        pub(crate) fn read_tap(&mut self) -> io::Result<usize> {
-            match &self.tap.mocks.read_tap {
-                ReadTapMock::MockFrame(frame) => {
-                    self.rx_frame_buf[..frame.len()].copy_from_slice(frame);
-                    Ok(frame.len())
-                }
-                ReadTapMock::Failure => Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Read tap synthetically failed.",
-                )),
-                ReadTapMock::TapFrame => self.tap.read(&mut self.rx_frame_buf),
-            }
-        }
-
-        pub(crate) fn write_tap(tap: &mut Tap, buf: &IoVecBuffer) -> io::Result<usize> {
-            match tap.mocks.write_tap {
-                WriteTapMock::Success => tap.write_iovec(buf),
-                WriteTapMock::Failure => Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Write tap mock failure.",
-                )),
-            }
-        }
-    }
 
     #[test]
     fn test_vnet_helpers() {
@@ -1142,7 +1113,8 @@ pub mod tests {
 
     #[test]
     fn test_rx_missing_queue_signal() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
 
         th.add_desc_chain(NetQueue::Rx, 0, &[(0, 4096, VIRTQ_DESC_F_WRITE)]);
@@ -1159,7 +1131,8 @@ pub mod tests {
 
     #[test]
     fn test_rx_read_only_descriptor() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
 
         th.add_desc_chain(
@@ -1179,7 +1152,8 @@ pub mod tests {
 
     #[test]
     fn test_rx_short_writable_descriptor() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
 
         th.add_desc_chain(NetQueue::Rx, 0, &[(0, 100, VIRTQ_DESC_F_WRITE)]);
@@ -1191,7 +1165,8 @@ pub mod tests {
 
     #[test]
     fn test_rx_partial_write() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
 
         // The descriptor chain is created so that the last descriptor doesn't fit in the
@@ -1214,9 +1189,9 @@ pub mod tests {
 
     #[test]
     fn test_rx_retry() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
-        th.net().tap.mocks.set_read_tap(ReadTapMock::TapFrame);
 
         // Add invalid descriptor chain - read only descriptor.
         th.add_desc_chain(
@@ -1265,9 +1240,9 @@ pub mod tests {
 
     #[test]
     fn test_rx_complex_desc_chain() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
-        th.net().tap.mocks.set_read_tap(ReadTapMock::TapFrame);
 
         // Create a valid Rx avail descriptor chain with multiple descriptors.
         th.add_desc_chain(
@@ -1304,9 +1279,9 @@ pub mod tests {
 
     #[test]
     fn test_rx_multiple_frames() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
-        th.net().tap.mocks.set_read_tap(ReadTapMock::TapFrame);
 
         // Create 2 valid Rx avail descriptor chains. Each one has enough space to fit the
         // following 2 frames. But only 1 frame has to be written to each chain.
@@ -1348,7 +1323,8 @@ pub mod tests {
 
     #[test]
     fn test_tx_missing_queue_signal() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
         let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
 
@@ -1368,7 +1344,8 @@ pub mod tests {
 
     #[test]
     fn test_tx_writeable_descriptor() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
         let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
 
@@ -1387,7 +1364,8 @@ pub mod tests {
 
     #[test]
     fn test_tx_short_frame() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
         let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
 
@@ -1409,7 +1387,8 @@ pub mod tests {
 
     #[test]
     fn test_tx_big_frame() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
         let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
 
@@ -1435,7 +1414,8 @@ pub mod tests {
 
     #[test]
     fn test_tx_empty_frame() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
         let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
 
@@ -1457,7 +1437,8 @@ pub mod tests {
 
     #[test]
     fn test_tx_retry() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
         let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
 
@@ -1499,7 +1480,8 @@ pub mod tests {
 
     #[test]
     fn test_tx_complex_descriptor() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
         let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
 
@@ -1527,9 +1509,12 @@ pub mod tests {
 
     #[test]
     fn test_tx_tap_failure() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
-        th.net().tap.mocks.set_write_tap(WriteTapMock::Failure);
+        // force the next write to the tap to return an error by simply closing the fd
+        // SAFETY: its a valid fd
+        unsafe { libc::close(th.net.lock().unwrap().tap.as_raw_fd()) };
 
         let desc_list = [(0, 1000, 0)];
         th.add_desc_chain(NetQueue::Tx, 0, &desc_list);
@@ -1549,7 +1534,8 @@ pub mod tests {
 
     #[test]
     fn test_tx_multiple_frame() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
         let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
 
@@ -1702,7 +1688,8 @@ pub mod tests {
 
     #[test]
     fn test_process_error_cases() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
 
         // RX rate limiter events should error since the limiter is not blocked.
@@ -1727,9 +1714,12 @@ pub mod tests {
     //  * interrupt_evt.write
     #[test]
     fn test_read_tap_fail_event_handler() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
-        th.net().tap.mocks.set_read_tap(ReadTapMock::Failure);
+        // force the next write to the tap to return an error by simply closing the fd
+        // SAFETY: its a valid fd
+        unsafe { libc::close(th.net.lock().unwrap().tap.as_raw_fd()) };
 
         // The RX queue is empty and rx_deffered_frame is set.
         th.net().rx_deferred_frame = true;
@@ -1755,9 +1745,9 @@ pub mod tests {
 
     #[test]
     fn test_deferred_frame() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
-        th.net().tap.mocks.set_read_tap(ReadTapMock::TapFrame);
 
         let rx_packets_count = th.net().metrics.rx_packets_count.count();
         let _ = inject_tap_tx_frame(&th.net(), 1000);
@@ -1808,7 +1798,8 @@ pub mod tests {
 
     #[test]
     fn test_rx_rate_limiter_handling() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
 
         th.net().rx_rate_limiter = RateLimiter::new(0, 0, 0, 0, 0, 0).unwrap();
@@ -1822,7 +1813,8 @@ pub mod tests {
 
     #[test]
     fn test_tx_rate_limiter_handling() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
 
         th.net().tx_rate_limiter = RateLimiter::new(0, 0, 0, 0, 0, 0).unwrap();
@@ -1837,7 +1829,8 @@ pub mod tests {
 
     #[test]
     fn test_bandwidth_rate_limiter() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
 
         // Test TX bandwidth rate limiting
@@ -1911,17 +1904,21 @@ pub mod tests {
 
         // Test RX bandwidth rate limiting
         {
-            // create bandwidth rate limiter that allows 40960 bytes/s with bucket size 4096 bytes
-            let mut rl = RateLimiter::new(0x1000, 0, 100, 0, 0, 0).unwrap();
-            // use up the budget
-            assert!(rl.consume(0x1000, TokenType::Bytes));
-
-            // set this rx rate limiter to be used
-            th.net().rx_rate_limiter = rl;
+            // create bandwidth rate limiter that allows 2000 bytes/s with bucket size 1000 bytes
+            let mut rl = RateLimiter::new(1000, 0, 500, 0, 0, 0).unwrap();
 
             // set up RX
             assert!(!th.net().rx_deferred_frame);
             th.add_desc_chain(NetQueue::Rx, 0, &[(0, 4096, VIRTQ_DESC_F_WRITE)]);
+
+            let frame = inject_tap_tx_frame(&th.net(), 1000);
+
+            // use up the budget (do it after injecting the tx frame, as socket communication is
+            // slow enough that the ratelimiter could replenish in the meantime).
+            assert!(rl.consume(1000, TokenType::Bytes));
+
+            // set this rx rate limiter to be used
+            th.net().rx_rate_limiter = rl;
 
             // following RX procedure should fail because of bandwidth rate limiting
             {
@@ -1946,13 +1943,12 @@ pub mod tests {
                 assert_eq!(th.net().metrics.rx_rate_limiter_throttled.count(), 2);
             }
 
-            // wait for 100ms to give the rate-limiter timer a chance to replenish
-            // wait for an extra 100ms to make sure the timerfd event makes its way from the kernel
-            thread::sleep(Duration::from_millis(200));
+            // wait for 500ms to give the rate-limiter timer a chance to replenish
+            // wait for an extra 500ms to make sure the timerfd event makes its way from the kernel
+            thread::sleep(Duration::from_millis(1000));
 
             // following RX procedure should succeed because bandwidth should now be available
             {
-                let frame = &th.net().tap.mocks.read_tap.mock_frame();
                 // no longer throttled
                 check_metric_after_block!(
                     th.net().metrics.rx_rate_limiter_throttled,
@@ -1967,14 +1963,15 @@ pub mod tests {
                 assert_eq!(th.rxq.used.idx.get(), 1);
                 th.rxq
                     .check_used_elem(0, 0, frame.len().try_into().unwrap());
-                th.rxq.dtable[0].check_data(frame);
+                th.rxq.dtable[0].check_data(&frame);
             }
         }
     }
 
     #[test]
     fn test_ops_rate_limiter() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
 
         // Test TX ops rate limiting
@@ -2025,17 +2022,19 @@ pub mod tests {
 
         // Test RX ops rate limiting
         {
-            // create ops rate limiter that allows 10 ops/s with bucket size 1 ops
-            let mut rl = RateLimiter::new(0, 0, 0, 1, 0, 100).unwrap();
+            // create ops rate limiter that allows 2 ops/s with bucket size 1 ops
+            let mut rl = RateLimiter::new(0, 0, 0, 1, 0, 500).unwrap();
+
+            // set up RX
+            assert!(!th.net().rx_deferred_frame);
+            th.add_desc_chain(NetQueue::Rx, 0, &[(0, 4096, VIRTQ_DESC_F_WRITE)]);
+            let frame = inject_tap_tx_frame(&th.net(), 1234);
+
             // use up the initial budget
             assert!(rl.consume(1, TokenType::Ops));
 
             // set this rx rate limiter to be used
             th.net().rx_rate_limiter = rl;
-
-            // set up RX
-            assert!(!th.net().rx_deferred_frame);
-            th.add_desc_chain(NetQueue::Rx, 0, &[(0, 4096, VIRTQ_DESC_F_WRITE)]);
 
             // following RX procedure should fail because of ops rate limiting
             {
@@ -2063,13 +2062,12 @@ pub mod tests {
                 assert_eq!(th.rxq.used.idx.get(), 0);
             }
 
-            // wait for 100ms to give the rate-limiter timer a chance to replenish
-            // wait for an extra 100ms to make sure the timerfd event makes its way from the kernel
-            thread::sleep(Duration::from_millis(200));
+            // wait for 500ms to give the rate-limiter timer a chance to replenish
+            // wait for an extra 500ms to make sure the timerfd event makes its way from the kernel
+            thread::sleep(Duration::from_millis(1000));
 
             // following RX procedure should succeed because ops should now be available
             {
-                let frame = &th.net().tap.mocks.read_tap.mock_frame();
                 th.simulate_event(NetEvent::RxRateLimiter);
                 // make sure the virtio queue operation completed this time
                 assert!(&th.net().irq_trigger.has_pending_irq(IrqType::Vring));
@@ -2077,14 +2075,15 @@ pub mod tests {
                 assert_eq!(th.rxq.used.idx.get(), 1);
                 th.rxq
                     .check_used_elem(0, 0, frame.len().try_into().unwrap());
-                th.rxq.dtable[0].check_data(frame);
+                th.rxq.dtable[0].check_data(&frame);
             }
         }
     }
 
     #[test]
     fn test_patch_rate_limiters() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
 
         th.net().rx_rate_limiter = RateLimiter::new(10, 0, 10, 2, 0, 2).unwrap();
@@ -2125,7 +2124,8 @@ pub mod tests {
 
     #[test]
     fn test_virtio_device() {
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.activate_net();
         let net = th.net.lock().unwrap();
 
@@ -2146,7 +2146,8 @@ pub mod tests {
     fn test_queues_notification_suppression() {
         let features = 1 << VIRTIO_RING_F_EVENT_IDX;
 
-        let mut th = TestHelper::get_default();
+        let mem = single_region_mem(2 * MAX_BUFFER_SIZE);
+        let mut th = TestHelper::get_default(&mem);
         th.net().set_acked_features(features);
         th.activate_net();
 

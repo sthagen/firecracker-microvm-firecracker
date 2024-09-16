@@ -23,8 +23,7 @@
 use std::fmt::Debug;
 
 use log::{error, warn};
-use utils::byte_order;
-use utils::eventfd::EventFd;
+use vmm_sys_util::eventfd::EventFd;
 
 use super::super::super::DeviceError;
 use super::defs::uapi;
@@ -36,6 +35,7 @@ use crate::devices::virtio::vsock::metrics::METRICS;
 use crate::devices::virtio::vsock::VsockError;
 use crate::devices::virtio::ActivateError;
 use crate::logger::IncMetric;
+use crate::utils::byte_order;
 use crate::vstate::memory::{Bytes, GuestMemoryMmap};
 
 pub(crate) const RXQ_INDEX: usize = 0;

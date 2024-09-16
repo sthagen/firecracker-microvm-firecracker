@@ -8,8 +8,8 @@ use std::num::Wrapping;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::Ordering;
 
-use utils::syscall::SyscallReturnCode;
 use vm_memory::{VolatileMemory, VolatileMemoryError};
+use vmm_sys_util::syscall::SyscallReturnCode;
 
 use super::mmap::{mmap, MmapError};
 use crate::io_uring::gen;

@@ -7,11 +7,11 @@
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 
-use utils::eventfd::EventFd;
 use vhost::vhost_user::message::*;
 use vhost::vhost_user::{Frontend, VhostUserFrontend};
 use vhost::{Error as VhostError, VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
 use vm_memory::{Address, Error as MmapError, GuestMemory, GuestMemoryError, GuestMemoryRegion};
+use vmm_sys_util::eventfd::EventFd;
 
 use crate::devices::virtio::device::IrqTrigger;
 use crate::devices::virtio::queue::Queue;
@@ -462,10 +462,10 @@ impl<T: VhostUserHandleBackend> VhostUserHandleImpl<T> {
 mod tests {
     #![allow(clippy::undocumented_unsafe_blocks)]
 
-    use utils::tempfile::TempFile;
+    use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
-    use crate::utilities::test_utils::create_tmp_socket;
+    use crate::test_utils::create_tmp_socket;
     use crate::vstate::memory::{FileOffset, GuestAddress, GuestMemoryExtension};
 
     #[test]

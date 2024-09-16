@@ -1,8 +1,8 @@
 // Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use utils::fam::{FamStruct, FamStructWrapper};
-use utils::generate_fam_struct_impl;
+use vmm_sys_util::fam::{FamStruct, FamStructWrapper};
+use vmm_sys_util::generate_fam_struct_impl;
 
 use crate::io_uring::gen::{io_uring_probe, io_uring_probe_op};
 

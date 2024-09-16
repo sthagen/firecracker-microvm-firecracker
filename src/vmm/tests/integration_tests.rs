@@ -5,7 +5,6 @@ use std::io::{Seek, SeekFrom};
 use std::thread;
 use std::time::Duration;
 
-use utils::tempfile::TempFile;
 use vmm::builder::build_and_boot_microvm;
 use vmm::devices::virtio::block::CacheType;
 use vmm::persist::{snapshot_state_sanity_check, MicrovmState, MicrovmStateError, VmInfo};
@@ -15,10 +14,10 @@ use vmm::rpc_interface::{
 };
 use vmm::seccomp_filters::get_empty_filters;
 use vmm::snapshot::Snapshot;
-use vmm::utilities::mock_resources::{MockVmResources, NOISY_KERNEL_IMAGE};
 #[cfg(target_arch = "x86_64")]
-use vmm::utilities::test_utils::dirty_tracking_vmm;
-use vmm::utilities::test_utils::{create_vmm, default_vmm, default_vmm_no_boot};
+use vmm::test_utils::dirty_tracking_vmm;
+use vmm::test_utils::mock_resources::{MockVmResources, NOISY_KERNEL_IMAGE};
+use vmm::test_utils::{create_vmm, default_vmm, default_vmm_no_boot};
 use vmm::vmm_config::balloon::BalloonDeviceConfig;
 use vmm::vmm_config::boot_source::BootSourceConfig;
 use vmm::vmm_config::drive::BlockDeviceConfig;
@@ -30,6 +29,7 @@ use vmm::vmm_config::snapshot::{
 };
 use vmm::vmm_config::vsock::VsockDeviceConfig;
 use vmm::{DumpCpuConfigError, EventManager, FcExitCode};
+use vmm_sys_util::tempfile::TempFile;
 
 #[test]
 fn test_build_and_boot_microvm() {

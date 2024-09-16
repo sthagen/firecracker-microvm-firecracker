@@ -28,7 +28,7 @@ use std::fmt::Debug;
 ///     buffers.
 use event_manager::{EventOps, Events, MutEventSubscriber};
 use log::{error, warn};
-use utils::epoll::EventSet;
+use vmm_sys_util::epoll::EventSet;
 
 use super::device::{Vsock, EVQ_INDEX, RXQ_INDEX, TXQ_INDEX};
 use super::VsockBackend;
@@ -225,7 +225,7 @@ mod tests {
     use super::*;
     use crate::devices::virtio::vsock::packet::VSOCK_PKT_HDR_SIZE;
     use crate::devices::virtio::vsock::test_utils::{EventHandlerContext, TestContext};
-    use crate::utilities::test_utils::multi_region_mem;
+    use crate::test_utils::multi_region_mem;
     use crate::vstate::memory::Bytes;
 
     #[test]

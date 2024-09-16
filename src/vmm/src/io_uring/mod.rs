@@ -22,7 +22,7 @@ use queue::completion::CompletionQueue;
 pub use queue::submission::SQueueError;
 use queue::submission::SubmissionQueue;
 use restriction::Restriction;
-use utils::syscall::SyscallReturnCode;
+use vmm_sys_util::syscall::SyscallReturnCode;
 
 // IO_uring operations that we require to be supported by the host kernel.
 const REQUIRED_OPS: [OpCode; 2] = [OpCode::Read, OpCode::Write];
@@ -37,7 +37,7 @@ pub enum IoUringError {
     /// Could not enable the ring: {0}
     Enable(IOError),
     /// A FamStructWrapper operation has failed: {0}
-    Fam(utils::fam::Error),
+    Fam(vmm_sys_util::fam::Error),
     /// The number of ops in the ring is >= CQ::count
     FullCQueue,
     /// Fd was not registered: {0}
@@ -387,9 +387,9 @@ mod tests {
     use proptest::prelude::*;
     use proptest::strategy::Strategy;
     use proptest::test_runner::{Config, TestRunner};
-    use utils::syscall::SyscallReturnCode;
-    use utils::tempfile::TempFile;
     use vm_memory::VolatileMemory;
+    use vmm_sys_util::syscall::SyscallReturnCode;
+    use vmm_sys_util::tempfile::TempFile;
 
     /// -------------------------------------
     /// BEGIN PROPERTY BASED TESTING

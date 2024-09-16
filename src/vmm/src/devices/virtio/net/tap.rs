@@ -7,17 +7,15 @@
 
 use std::fmt::{self, Debug};
 use std::fs::File;
-use std::io::{Error as IoError, Read, Write};
+use std::io::{Error as IoError, Read};
 use std::os::raw::*;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
-use utils::ioctl::{ioctl_with_mut_ref, ioctl_with_ref, ioctl_with_val};
-use utils::{ioctl_ioc_nr, ioctl_iow_nr};
+use vmm_sys_util::ioctl::{ioctl_with_mut_ref, ioctl_with_ref, ioctl_with_val};
+use vmm_sys_util::{ioctl_ioc_nr, ioctl_iow_nr};
 
 use crate::devices::virtio::iovec::IoVecBuffer;
 use crate::devices::virtio::net::gen;
-#[cfg(test)]
-use crate::devices::virtio::net::test_utils::Mocks;
 
 // As defined in the Linux UAPI:
 // https://elixir.bootlin.com/linux/v4.17/source/include/uapi/linux/if.h#L33
@@ -53,9 +51,6 @@ ioctl_iow_nr!(TUNSETVNETHDRSZ, TUNTAP, 216, ::std::os::raw::c_int);
 pub struct Tap {
     tap_file: File,
     pub(crate) if_name: [u8; IFACE_NAME_MAX_LEN],
-
-    #[cfg(test)]
-    pub(crate) mocks: Mocks,
 }
 
 // Returns a byte vector representing the contents of a null terminated C string which
@@ -149,9 +144,6 @@ impl Tap {
             tap_file: tuntap,
             // SAFETY: Safe since only the name is accessed, and it's cloned out.
             if_name: unsafe { ifreq.ifr_ifrn.ifrn_name },
-
-            #[cfg(test)]
-            mocks: Mocks::default(),
         })
     }
 
@@ -203,16 +195,6 @@ impl Tap {
 impl Read for Tap {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
         self.tap_file.read(buf)
-    }
-}
-
-impl Write for Tap {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, IoError> {
-        self.tap_file.write(buf)
-    }
-
-    fn flush(&mut self) -> Result<(), IoError> {
-        Ok(())
     }
 }
 
@@ -288,7 +270,6 @@ pub mod tests {
         let faulty_tap = Tap {
             tap_file: unsafe { File::from_raw_fd(-2) },
             if_name: [0x01; 16],
-            mocks: Default::default(),
         };
         assert_eq!(
             faulty_tap.set_vnet_hdr_size(16).unwrap_err().to_string(),
@@ -312,7 +293,7 @@ pub mod tests {
         enable(&tap);
         let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&tap));
 
-        let packet = utils::rand::rand_alphanumerics(PAYLOAD_SIZE);
+        let packet = vmm_sys_util::rand::rand_alphanumerics(PAYLOAD_SIZE);
         tap_traffic_simulator.push_tx_packet(packet.as_bytes());
 
         let mut buf = [0u8; PACKET_SIZE];
@@ -324,36 +305,16 @@ pub mod tests {
     }
 
     #[test]
-    fn test_write() {
-        let mut tap = Tap::open_named("").unwrap();
-        enable(&tap);
-        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&tap));
-
-        let mut packet = [0u8; PACKET_SIZE];
-        let payload = utils::rand::rand_alphanumerics(PAYLOAD_SIZE);
-        packet[gen::ETH_HLEN as usize..payload.len() + gen::ETH_HLEN as usize]
-            .copy_from_slice(payload.as_bytes());
-        assert_eq!(tap.write(&packet).unwrap(), PACKET_SIZE);
-
-        let mut read_buf = [0u8; PACKET_SIZE];
-        assert!(tap_traffic_simulator.pop_rx_packet(&mut read_buf));
-        assert_eq!(
-            &read_buf[..PACKET_SIZE - VNET_HDR_SIZE],
-            &packet[VNET_HDR_SIZE..]
-        );
-    }
-
-    #[test]
     fn test_write_iovec() {
         let mut tap = Tap::open_named("").unwrap();
         enable(&tap);
         let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&tap));
 
-        let mut fragment1 = utils::rand::rand_bytes(PAYLOAD_SIZE);
+        let mut fragment1 = vmm_sys_util::rand::rand_bytes(PAYLOAD_SIZE);
         fragment1.as_mut_slice()[..gen::ETH_HLEN as usize]
             .copy_from_slice(&[0; gen::ETH_HLEN as usize]);
-        let fragment2 = utils::rand::rand_bytes(PAYLOAD_SIZE);
-        let fragment3 = utils::rand::rand_bytes(PAYLOAD_SIZE);
+        let fragment2 = vmm_sys_util::rand::rand_bytes(PAYLOAD_SIZE);
+        let fragment3 = vmm_sys_util::rand::rand_bytes(PAYLOAD_SIZE);
 
         let scattered = IoVecBuffer::from(vec![
             fragment1.as_slice(),

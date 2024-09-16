@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use utils::eventfd::EventFd;
+use vmm_sys_util::eventfd::EventFd;
 
 use super::device::DiskProperties;
 use super::*;
@@ -151,7 +151,7 @@ impl Persist<'_> for VirtioBlock {
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use utils::tempfile::TempFile;
+    use vmm_sys_util::tempfile::TempFile;
 
     use super::*;
     use crate::devices::virtio::block::virtio::device::VirtioBlockConfig;

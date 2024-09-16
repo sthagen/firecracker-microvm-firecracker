@@ -36,7 +36,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use log::{debug, error, info, warn};
-use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
+use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 
 use super::super::csm::ConnState;
 use super::super::defs::uapi;
@@ -791,7 +791,7 @@ mod tests {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
 
-    use utils::tempfile::TempFile;
+    use vmm_sys_util::tempfile::TempFile;
 
     use super::super::super::csm::defs as csm_defs;
     use super::*;

@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use utils::eventfd::EventFd;
+use vmm_sys_util::eventfd::EventFd;
 
 use super::mmio::{VIRTIO_MMIO_INT_CONFIG, VIRTIO_MMIO_INT_VRING};
 use super::queue::{Queue, QueueError};
