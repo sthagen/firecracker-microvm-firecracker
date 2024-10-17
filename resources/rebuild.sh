@@ -5,17 +5,19 @@
 # fail if we encounter an error, uninitialized variable or a pipe breaks
 set -eu -o pipefail
 
-set -x
 PS4='+\t '
 
 cd $(dirname $0)
 ARCH=$(uname -m)
 OUTPUT_DIR=$PWD/$ARCH
 
+GIT_ROOT_DIR=$(git rev-parse --show-toplevel)
+source "$GIT_ROOT_DIR/tools/functions"
+
 # Make sure we have all the needed tools
 function install_dependencies {
-    sudo apt update
-    sudo apt install -y bc flex bison gcc make libelf-dev libssl-dev squashfs-tools busybox-static tree cpio curl
+    apt update
+    apt install -y bc flex bison gcc make libelf-dev libssl-dev squashfs-tools busybox-static tree cpio curl patch docker.io
 }
 
 function dir2ext4img {
@@ -28,13 +30,21 @@ function dir2ext4img {
     local TMP_MNT=$(mktemp -d)
     truncate -s "$SIZE" "$IMG"
     mkfs.ext4 -F "$IMG"
-    sudo mount "$IMG" "$TMP_MNT"
-    sudo tar c -C $DIR . |sudo tar x -C "$TMP_MNT"
+    mount "$IMG" "$TMP_MNT"
+    tar c -C $DIR . |tar x -C "$TMP_MNT"
     # cleanup
-    sudo umount "$TMP_MNT"
+    # Use the -l flag for lazy unmounting since sometimes umount fails
+    # with "device busy" and simply calling `sync` doesn't help
+    umount -l "$TMP_MNT"
     rmdir $TMP_MNT
 }
 
+function prepare_docker {
+    nohup /usr/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://127.0.0.1:2375 &
+
+    # Wait for Docker socket to be created
+    timeout 15 sh -c "until docker info; do echo .; sleep 1; done"
+}
 
 function compile_and_install {
     local C_FILE=$1
@@ -50,7 +60,10 @@ function build_rootfs {
     local flavour=${2}
     local FROM_CTR=public.ecr.aws/ubuntu/ubuntu:$flavour
     local rootfs="tmp_rootfs"
-    mkdir -pv "$rootfs" "$OUTPUT_DIR"
+    mkdir -pv "$rootfs"
+
+    # Launch Docker
+    prepare_docker
 
     cp -rvf overlay/* $rootfs
 
@@ -74,25 +87,29 @@ mkdir -pv $rootfs/var/lib/dpkg/
 EOF
 
     # TBD what abt /etc/hosts?
-    echo |sudo tee $rootfs/etc/resolv.conf
+    echo | tee $rootfs/etc/resolv.conf
 
     # Generate key for ssh access from host
     if [ ! -s id_rsa ]; then
         ssh-keygen -f id_rsa -N ""
     fi
-    sudo install -d -m 0600 "$rootfs/root/.ssh/"
-    sudo cp id_rsa.pub "$rootfs/root/.ssh/authorized_keys"
+    install -d -m 0600 "$rootfs/root/.ssh/"
+    cp id_rsa.pub "$rootfs/root/.ssh/authorized_keys"
     id_rsa=$OUTPUT_DIR/$ROOTFS_NAME.id_rsa
-    sudo cp id_rsa $id_rsa
+    cp id_rsa $id_rsa
 
     # -comp zstd but guest kernel does not support
     rootfs_img="$OUTPUT_DIR/$ROOTFS_NAME.squashfs"
-    sudo mv $rootfs/root/manifest $OUTPUT_DIR/$ROOTFS_NAME.manifest
-    sudo mksquashfs $rootfs $rootfs_img -all-root -noappend
+    mv $rootfs/root/manifest $OUTPUT_DIR/$ROOTFS_NAME.manifest
+    mksquashfs $rootfs $rootfs_img -all-root -noappend
     rootfs_ext4=$OUTPUT_DIR/$ROOTFS_NAME.ext4
     dir2ext4img $rootfs $rootfs_ext4
-    sudo rm -rf $rootfs
-    sudo chown -Rc $USER. $OUTPUT_DIR
+    rm -rf $rootfs
+    for bin in fast_page_fault_helper fillmem init readmem; do
+        rm $PWD/overlay/usr/local/bin/$bin
+    done
+    rm -f id_rsa{,.pub}
+    rm -f nohup.out
 }
 
 
@@ -199,31 +216,117 @@ function build_al_kernel {
     popd &>/dev/null
 }
 
-#### main ####
+function prepare_and_build_rootfs {
+    BIN=overlay/usr/local/bin
+    compile_and_install $BIN/init.c $BIN/init
+    compile_and_install $BIN/fillmem.c $BIN/fillmem
+    compile_and_install $BIN/fast_page_fault_helper.c $BIN/fast_page_fault_helper
+    compile_and_install $BIN/readmem.c $BIN/readmem
+    if [ $ARCH == "aarch64" ]; then
+        compile_and_install $BIN/devmemread.c $BIN/devmemread
+    fi
 
-install_dependencies
+    build_rootfs ubuntu-22.04 jammy
+    build_initramfs
+}
 
-BIN=overlay/usr/local/bin
-compile_and_install $BIN/init.c    $BIN/init
-compile_and_install $BIN/fillmem.c $BIN/fillmem
-compile_and_install $BIN/fast_page_fault_helper.c $BIN/fast_page_fault_helper
-compile_and_install $BIN/readmem.c $BIN/readmem
-if [ $ARCH == "aarch64" ]; then
-    compile_and_install $BIN/devmemread.c $BIN/devmemread
-fi
+function build_al_kernels {
+    if [[ $# = 0 ]]; then
+        local KERNEL_VERSION="all"
+    elif [[ $# -ne 1 ]]; then
+        die "Too many arguments in '$(basename $0) kernels' command. Please use \`$0 help\` for help."
+    else 
+        KERNEL_VERSION=$1
+        if [[ "$KERNEL_VERSION" != @(5.10|5.10-no-acpi|6.1) ]]; then
+            die "Unsupported kernel version: '$KERNEL_VERSION'. Please use \`$0 help\` for help."
+        fi
+    fi
 
-build_rootfs ubuntu-22.04 jammy
-build_initramfs
+    clone_amazon_linux_repo
 
-clone_amazon_linux_repo
+    # Apply kernel patches on top of AL configuration
+    apply_kernel_patches_for_ci
 
-# Apply kernel patches on top of AL configuration
-apply_kernel_patches_for_ci
+    if [[ "$KERNEL_VERSION" == @(all|5.10) ]]; then
+        build_al_kernel $PWD/guest_configs/microvm-kernel-ci-$ARCH-5.10.config
+    fi
+    if [[ $ARCH == "x86_64" && "$KERNEL_VERSION" == @(all|5.10-no-acpi) ]]; then
+        build_al_kernel $PWD/guest_configs/microvm-kernel-ci-$ARCH-5.10-no-acpi.config
+    fi
+    if [[ "$KERNEL_VERSION" == @(all|6.1) ]]; then
+        build_al_kernel $PWD/guest_configs/microvm-kernel-ci-$ARCH-6.1.config 5.10
+    fi
 
-build_al_kernel $PWD/guest_configs/microvm-kernel-ci-$ARCH-5.10.config
-if [ $ARCH == "x86_64" ]; then
-    build_al_kernel $PWD/guest_configs/microvm-kernel-ci-$ARCH-5.10-no-acpi.config
-fi
-build_al_kernel $PWD/guest_configs/microvm-kernel-ci-$ARCH-6.1.config
+    # Undo kernel patches on top of AL configuration
+    git restore $PWD/guest_configs
+    rm -rf $PWD/guest_configs/*.orig 
+}
 
-tree -h $OUTPUT_DIR
+function print_help {
+    cat <<EOF
+Firecracker CI artifacts build script
+
+Usage: $(basename $0) [<command>] [<command args>]
+    
+Available commands:
+    
+    all (default)
+        Build CI rootfs and default guest kernels using configurations from
+        resources/guest_configs.
+        This will patch the guest configurations with all the patches under
+        resources/guest_configs/patches.
+        This is the default command, if no command is chosen.
+    
+    rootfs
+        Builds only the CI rootfs.
+    
+    kernels [version]
+        Builds our the currently supported CI kernels.
+    
+        version: Optionally choose a kernel version to build. Supported
+                 versions are: 5.10, 5.10-no-acpi or 6.1.
+    
+    help
+        Displays the help message and exits.
+EOF
+}
+
+function main {
+    if [[ $# = 0 ]]; then
+        local MODE="all"
+    else
+        case $1 in
+            all|rootfs|kernels)
+                local MODE=$1
+                shift
+                ;;
+            help)
+                print_help
+                exit 0
+                ;;
+            *)
+                die "Unknown command: '$1'. Please use \`$0 help\` for help."
+        esac
+    fi
+
+    set -x
+        
+    install_dependencies
+
+    # Create the directory in which we will store the kernels and rootfs
+    mkdir -pv $OUTPUT_DIR
+
+    if [[ "$MODE" =~ (all|rootfs) ]]; then
+        say "Building rootfs"
+        prepare_and_build_rootfs
+    fi
+
+    if [[ "$MODE" =~ (all|kernels) ]]; then
+        say "Building CI kernels"
+        build_al_kernels "$@"
+    fi
+
+    tree -h $OUTPUT_DIR
+}
+
+main "$@"
