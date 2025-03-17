@@ -12,6 +12,8 @@ and this project adheres to
 
 - [#5065](https://github.com/firecracker-microvm/firecracker/pull/5065) Added
   support for Intel AMX (Advanced Matrix Extensions).
+- [#4731](https://github.com/firecracker-microvm/firecracker/pull/4731): Added
+  support for modifying the host TAP device name during snapshot restore.
 
 ### Changed
 
@@ -41,6 +43,8 @@ and this project adheres to
   provides the appropriate ELF Note to indicate that PVH boot mode is supported.
   Linux kernels newer than 5.0 compiled with `CONFIG_PVH=y` set this ELF Note,
   as do FreeBSD kernels.
+- [#5088](https://github.com/firecracker-microvm/firecracker/pull/5088): Added
+  AMD Genoa as a supported and tested platform for Firecracker.
 
 ### Changed
 
