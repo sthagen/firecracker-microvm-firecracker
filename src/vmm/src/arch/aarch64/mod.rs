@@ -5,12 +5,16 @@ pub(crate) mod cache_info;
 mod fdt;
 /// Module for the global interrupt controller configuration.
 pub mod gic;
+/// Architecture specific KVM-related code
+pub mod kvm;
 /// Layout for this aarch64 system.
 pub mod layout;
 /// Logic for configuring aarch64 registers.
 pub mod regs;
-/// Helper methods for VcpuFd.
+/// Architecture specific vCPU code
 pub mod vcpu;
+/// Architecture specific VM state code
+pub mod vm;
 
 use std::cmp::min;
 use std::collections::HashMap;
@@ -19,9 +23,9 @@ use std::fmt::Debug;
 
 use vm_memory::GuestMemoryError;
 
-pub use self::fdt::DeviceInfoForFDT;
 use self::gic::GICDevice;
 use crate::arch::DeviceType;
+use crate::device_manager::mmio::MMIODeviceInfo;
 use crate::devices::acpi::vmgenid::VmGenId;
 use crate::vstate::memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
@@ -59,11 +63,11 @@ pub fn arch_memory_regions(size: usize) -> Vec<(GuestAddress, usize)> {
 /// * `device_info` - A hashmap containing the attached devices for building FDT device nodes.
 /// * `gic_device` - The GIC device.
 /// * `initrd` - Information about an optional initrd.
-pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug>(
+pub fn configure_system(
     guest_mem: &GuestMemoryMmap,
     cmdline_cstring: CString,
     vcpu_mpidr: Vec<u64>,
-    device_info: &HashMap<(DeviceType, String), T>,
+    device_info: &HashMap<(DeviceType, String), MMIODeviceInfo>,
     gic_device: &GICDevice,
     vmgenid: &Option<VmGenId>,
     initrd: &Option<super::InitrdConfig>,

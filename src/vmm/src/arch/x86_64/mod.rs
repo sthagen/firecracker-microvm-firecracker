@@ -12,6 +12,8 @@ pub mod cpu_model;
 mod gdt;
 /// Contains logic for setting up Advanced Programmable Interrupt Controller (local version).
 pub mod interrupts;
+/// Architecture specific KVM-related code
+pub mod kvm;
 /// Layout for the x86_64 system.
 pub mod layout;
 mod mptable;
@@ -19,6 +21,10 @@ mod mptable;
 pub mod msr;
 /// Logic for configuring x86_64 registers.
 pub mod regs;
+/// Architecture specific vCPU code
+pub mod vcpu;
+/// Architecture specific VM state code
+pub mod vm;
 /// Logic for configuring XSTATE features.
 pub mod xstate;
 
@@ -35,7 +41,7 @@ use linux_loader::loader::elf::start_info::{
 
 use crate::arch::{BootProtocol, InitrdConfig, SYSTEM_MEM_SIZE, SYSTEM_MEM_START};
 use crate::device_manager::resources::ResourceAllocator;
-use crate::utils::u64_to_usize;
+use crate::utils::{mib_to_bytes, u64_to_usize};
 use crate::vstate::memory::{
     Address, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion,
 };
@@ -67,10 +73,11 @@ pub enum ConfigurationError {
     StartInfoSetup,
 }
 
-const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
+/// First address that cannot be addressed using 32 bit anymore.
+pub const FIRST_ADDR_PAST_32BITS: u64 = 1 << 32;
 
 /// Size of MMIO gap at top of 32-bit address space.
-pub const MEM_32BIT_GAP_SIZE: u64 = 768 << 20;
+pub const MEM_32BIT_GAP_SIZE: u64 = mib_to_bytes(768) as u64;
 /// The start of the memory area reserved for MMIO devices.
 pub const MMIO_MEM_START: u64 = FIRST_ADDR_PAST_32BITS - MEM_32BIT_GAP_SIZE;
 /// The size of the memory area reserved for MMIO devices.
@@ -221,7 +228,7 @@ fn configure_pvh(
     // boot_params.  This will be stored at PVH_INFO_START address, and %rbx
     // will be initialized to contain PVH_INFO_START prior to starting the
     // guest, as required by the PVH ABI.
-    #[allow(clippy::cast_possible_truncation)] // the vec lenghts are single digit integers
+    #[allow(clippy::cast_possible_truncation)] // the vec lengths are single digit integers
     let mut start_info = hvm_start_info {
         magic: XEN_HVM_START_MAGIC_VALUE,
         version: 1,
@@ -396,7 +403,7 @@ mod tests {
         );
 
         // Now assigning some memory that falls before the 32bit memory hole.
-        let mem_size = 128 << 20;
+        let mem_size = mib_to_bytes(128);
         let gm = arch_mem(mem_size);
         let mut resource_allocator = ResourceAllocator::new().unwrap();
         configure_system(
@@ -421,7 +428,7 @@ mod tests {
         .unwrap();
 
         // Now assigning some memory that is equal to the start of the 32bit memory hole.
-        let mem_size = 3328 << 20;
+        let mem_size = mib_to_bytes(3328);
         let gm = arch_mem(mem_size);
         let mut resource_allocator = ResourceAllocator::new().unwrap();
         configure_system(
@@ -446,7 +453,7 @@ mod tests {
         .unwrap();
 
         // Now assigning some memory that falls after the 32bit memory hole.
-        let mem_size = 3330 << 20;
+        let mem_size = mib_to_bytes(3330);
         let gm = arch_mem(mem_size);
         let mut resource_allocator = ResourceAllocator::new().unwrap();
         configure_system(
