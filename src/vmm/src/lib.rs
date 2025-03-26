@@ -111,6 +111,9 @@ pub mod vmm_config;
 /// Module with virtual state structs.
 pub mod vstate;
 
+/// Module with initrd.
+pub mod initrd;
+
 use std::collections::HashMap;
 use std::io;
 use std::os::unix::io::AsRawFd;
@@ -128,7 +131,7 @@ use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::terminal::Terminal;
 use vstate::kvm::Kvm;
-use vstate::vcpu::{self, KvmVcpuConfigureError, StartThreadedError, VcpuSendEventError};
+use vstate::vcpu::{self, StartThreadedError, VcpuSendEventError};
 
 use crate::arch::DeviceType;
 use crate::cpu_config::templates::CpuConfiguration;
@@ -218,8 +221,6 @@ pub enum VmmError {
     EventFd(io::Error),
     /// I8042 error: {0}
     I8042Error(devices::legacy::I8042DeviceError),
-    /// Cannot access kernel file: {0}
-    KernelFile(io::Error),
     #[cfg(target_arch = "x86_64")]
     /// Cannot add devices to the legacy I/O Bus. {0}
     LegacyIOBus(device_manager::legacy::LegacyDeviceError),
@@ -233,17 +234,12 @@ pub enum VmmError {
     Serial(io::Error),
     /// Error creating timer fd: {0}
     TimerFd(io::Error),
-    /// Error configuring the vcpu for boot: {0}
-    VcpuConfigure(KvmVcpuConfigureError),
     /// Error creating the vcpu: {0}
     VcpuCreate(vstate::vcpu::VcpuError),
     /// Cannot send event to vCPU. {0}
     VcpuEvent(vstate::vcpu::VcpuError),
     /// Cannot create a vCPU handle. {0}
     VcpuHandle(vstate::vcpu::VcpuError),
-    #[cfg(target_arch = "aarch64")]
-    /// Error initializing the vcpu: {0}
-    VcpuInit(vstate::vcpu::KvmVcpuError),
     /// Failed to start vCPUs
     VcpuStart(StartVcpusError),
     /// Failed to pause the vCPUs.
@@ -448,11 +444,6 @@ impl Vmm {
         Ok(())
     }
 
-    /// Returns a reference to the inner `GuestMemoryMmap` object.
-    pub fn guest_memory(&self) -> &GuestMemoryMmap {
-        &self.guest_memory
-    }
-
     /// Sets RDA bit in serial console
     pub fn emulate_serial_init(&self) -> Result<(), EmulateSerialInitError> {
         // When restoring from a previously saved state, there is no serial
@@ -530,7 +521,7 @@ impl Vmm {
         };
         let device_states = self.mmio_device_manager.save();
 
-        let memory_state = self.guest_memory().describe();
+        let memory_state = self.guest_memory.describe();
         let acpi_dev_state = self.acpi_device_manager.save();
 
         Ok(MicrovmState {
@@ -745,7 +736,7 @@ impl Vmm {
     pub fn update_balloon_config(&mut self, amount_mib: u32) -> Result<(), BalloonError> {
         // The balloon cannot have a target size greater than the size of
         // the guest memory.
-        if u64::from(amount_mib) > mem_size_mib(self.guest_memory()) {
+        if u64::from(amount_mib) > mem_size_mib(&self.guest_memory) {
             return Err(BalloonError::TooManyPagesRequested);
         }
 

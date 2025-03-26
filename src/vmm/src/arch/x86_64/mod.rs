@@ -31,20 +31,33 @@ pub mod xstate;
 #[allow(missing_docs)]
 pub mod generated;
 
+use std::fs::File;
+
+use layout::CMDLINE_START;
 use linux_loader::configurator::linux::LinuxBootConfigurator;
 use linux_loader::configurator::pvh::PvhBootConfigurator;
 use linux_loader::configurator::{BootConfigurator, BootParams};
 use linux_loader::loader::bootparam::boot_params;
+use linux_loader::loader::elf::Elf as Loader;
 use linux_loader::loader::elf::start_info::{
     hvm_memmap_table_entry, hvm_modlist_entry, hvm_start_info,
 };
+use linux_loader::loader::{Cmdline, KernelLoader, PvhBootCapability, load_cmdline};
+use log::debug;
 
-use crate::arch::{BootProtocol, InitrdConfig, SYSTEM_MEM_SIZE, SYSTEM_MEM_START};
-use crate::device_manager::resources::ResourceAllocator;
-use crate::utils::{mib_to_bytes, u64_to_usize};
+use super::EntryPoint;
+use crate::acpi::create_acpi_tables;
+use crate::arch::{BootProtocol, SYSTEM_MEM_SIZE, SYSTEM_MEM_START};
+use crate::cpu_config::templates::{CustomCpuTemplate, GuestConfigError};
+use crate::cpu_config::x86_64::CpuConfiguration;
+use crate::initrd::InitrdConfig;
+use crate::utils::{align_down, mib_to_bytes, u64_to_usize, usize_to_u64};
+use crate::vmm_config::machine_config::MachineConfig;
 use crate::vstate::memory::{
     Address, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion,
 };
+use crate::vstate::vcpu::KvmVcpuConfigureError;
+use crate::{Vcpu, VcpuConfig, Vmm};
 
 // Value taken from https://elixir.bootlin.com/linux/v5.10.68/source/arch/x86/include/uapi/asm/e820.h#L31
 // Usable normal RAM
@@ -55,7 +68,7 @@ const E820_RESERVED: u32 = 2;
 const MEMMAP_TYPE_RAM: u32 = 1;
 
 /// Errors thrown while configuring x86_64 system.
-#[derive(Debug, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum ConfigurationError {
     /// Invalid e820 setup params.
     E820Configuration,
@@ -63,14 +76,24 @@ pub enum ConfigurationError {
     MpTableSetup(#[from] mptable::MptableError),
     /// Error writing the zero page of guest memory.
     ZeroPageSetup,
-    /// Failed to compute initrd address.
-    InitrdAddress,
     /// Error writing module entry to guest memory.
     ModlistSetup,
     /// Error writing memory map table to guest memory.
     MemmapTableSetup,
     /// Error writing hvm_start_info to guest memory.
     StartInfoSetup,
+    /// Cannot copy kernel file fd
+    KernelFile,
+    /// Cannot load kernel due to invalid memory configuration or invalid kernel image: {0}
+    KernelLoader(linux_loader::loader::Error),
+    /// Cannot load command line string: {0}
+    LoadCommandline(linux_loader::loader::Error),
+    /// Failed to create guest config: {0}
+    CreateGuestConfig(#[from] GuestConfigError),
+    /// Error configuring the vcpu for boot: {0}
+    VcpuConfigure(#[from] KvmVcpuConfigureError),
+    /// Error configuring ACPI: {0}
+    Acpi(#[from] crate::acpi::AcpiError),
 }
 
 /// First address that cannot be addressed using 32 bit anymore.
@@ -107,55 +130,93 @@ pub fn get_kernel_start() -> u64 {
 }
 
 /// Returns the memory address where the initrd could be loaded.
-pub fn initrd_load_addr(
-    guest_mem: &GuestMemoryMmap,
-    initrd_size: usize,
-) -> Result<u64, ConfigurationError> {
-    let first_region = guest_mem
-        .find_region(GuestAddress::new(0))
-        .ok_or(ConfigurationError::InitrdAddress)?;
+pub fn initrd_load_addr(guest_mem: &GuestMemoryMmap, initrd_size: usize) -> Option<u64> {
+    let first_region = guest_mem.find_region(GuestAddress::new(0))?;
     let lowmem_size = u64_to_usize(first_region.len());
 
     if lowmem_size < initrd_size {
-        return Err(ConfigurationError::InitrdAddress);
+        return None;
     }
 
-    let align_to_pagesize = |address| address & !(super::GUEST_PAGE_SIZE - 1);
-    Ok(align_to_pagesize(lowmem_size - initrd_size) as u64)
+    Some(align_down(
+        usize_to_u64(lowmem_size - initrd_size),
+        usize_to_u64(super::GUEST_PAGE_SIZE),
+    ))
 }
 
-/// Configures the system and should be called once per vm before starting vcpu threads.
-///
-/// # Arguments
-///
-/// * `guest_mem` - The memory to be used by the guest.
-/// * `cmdline_addr` - Address in `guest_mem` where the kernel command line was loaded.
-/// * `cmdline_size` - Size of the kernel command line in bytes including the null terminator.
-/// * `initrd` - Information about where the ramdisk image was loaded in the `guest_mem`.
-/// * `num_cpus` - Number of virtual CPUs the guest will have.
-/// * `boot_prot` - Boot protocol that will be used to boot the guest.
-pub fn configure_system(
-    guest_mem: &GuestMemoryMmap,
-    resource_allocator: &mut ResourceAllocator,
-    cmdline_addr: GuestAddress,
-    cmdline_size: usize,
+/// Configures the system for booting Linux.
+pub fn configure_system_for_boot(
+    vmm: &mut Vmm,
+    vcpus: &mut [Vcpu],
+    machine_config: &MachineConfig,
+    cpu_template: &CustomCpuTemplate,
+    entry_point: EntryPoint,
     initrd: &Option<InitrdConfig>,
-    num_cpus: u8,
-    boot_prot: BootProtocol,
+    boot_cmdline: Cmdline,
 ) -> Result<(), ConfigurationError> {
-    // Note that this puts the mptable at the last 1k of Linux's 640k base RAM
-    mptable::setup_mptable(guest_mem, resource_allocator, num_cpus)
-        .map_err(ConfigurationError::MpTableSetup)?;
+    // Construct the base CpuConfiguration to apply CPU template onto.
+    let cpu_config =
+        CpuConfiguration::new(vmm.kvm.supported_cpuid.clone(), cpu_template, &vcpus[0])?;
+    // Apply CPU template to the base CpuConfiguration.
+    let cpu_config = CpuConfiguration::apply_template(cpu_config, cpu_template)?;
 
-    match boot_prot {
+    let vcpu_config = VcpuConfig {
+        vcpu_count: machine_config.vcpu_count,
+        smt: machine_config.smt,
+        cpu_config,
+    };
+
+    // Configure vCPUs with normalizing and setting the generated CPU configuration.
+    for vcpu in vcpus.iter_mut() {
+        vcpu.kvm_vcpu
+            .configure(&vmm.guest_memory, entry_point, &vcpu_config)?;
+    }
+
+    // Write the kernel command line to guest memory. This is x86_64 specific, since on
+    // aarch64 the command line will be specified through the FDT.
+    let cmdline_size = boot_cmdline
+        .as_cstring()
+        .map(|cmdline_cstring| cmdline_cstring.as_bytes_with_nul().len())
+        .expect("Cannot create cstring from cmdline string");
+
+    load_cmdline(
+        &vmm.guest_memory,
+        GuestAddress(crate::arch::x86_64::layout::CMDLINE_START),
+        &boot_cmdline,
+    )
+    .map_err(ConfigurationError::LoadCommandline)?;
+
+    // Note that this puts the mptable at the last 1k of Linux's 640k base RAM
+    mptable::setup_mptable(
+        &vmm.guest_memory,
+        &mut vmm.resource_allocator,
+        vcpu_config.vcpu_count,
+    )
+    .map_err(ConfigurationError::MpTableSetup)?;
+
+    match entry_point.protocol {
         BootProtocol::PvhBoot => {
-            configure_pvh(guest_mem, cmdline_addr, initrd)?;
+            configure_pvh(&vmm.guest_memory, GuestAddress(CMDLINE_START), initrd)?;
         }
         BootProtocol::LinuxBoot => {
-            configure_64bit_boot(guest_mem, cmdline_addr, cmdline_size, initrd)?;
+            configure_64bit_boot(
+                &vmm.guest_memory,
+                GuestAddress(CMDLINE_START),
+                cmdline_size,
+                initrd,
+            )?;
         }
     }
 
+    // Create ACPI tables and write them in guest memory
+    // For the time being we only support ACPI in x86_64
+    create_acpi_tables(
+        &vmm.guest_memory,
+        &mut vmm.resource_allocator,
+        &vmm.mmio_device_manager,
+        &vmm.acpi_device_manager,
+        vcpus,
+    )?;
     Ok(())
 }
 
@@ -360,11 +421,47 @@ fn add_e820_entry(
     Ok(())
 }
 
+/// Load linux kernel into guest memory.
+pub fn load_kernel(
+    kernel: &File,
+    guest_memory: &GuestMemoryMmap,
+) -> Result<EntryPoint, ConfigurationError> {
+    // Need to clone the File because reading from it
+    // mutates it.
+    let mut kernel_file = kernel
+        .try_clone()
+        .map_err(|_| ConfigurationError::KernelFile)?;
+
+    let entry_addr = Loader::load(
+        guest_memory,
+        None,
+        &mut kernel_file,
+        Some(GuestAddress(get_kernel_start())),
+    )
+    .map_err(ConfigurationError::KernelLoader)?;
+
+    let mut entry_point_addr: GuestAddress = entry_addr.kernel_load;
+    let mut boot_prot: BootProtocol = BootProtocol::LinuxBoot;
+    if let PvhBootCapability::PvhEntryPresent(pvh_entry_addr) = entry_addr.pvh_boot_cap {
+        // Use the PVH kernel entry point to boot the guest
+        entry_point_addr = pvh_entry_addr;
+        boot_prot = BootProtocol::PvhBoot;
+    }
+
+    debug!("Kernel loaded using {boot_prot}");
+
+    Ok(EntryPoint {
+        entry_addr: entry_point_addr,
+        protocol: boot_prot,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use linux_loader::loader::bootparam::boot_e820_entry;
 
     use super::*;
+    use crate::device_manager::resources::ResourceAllocator;
     use crate::test_utils::{arch_mem, single_region_mem};
 
     #[test]
@@ -388,94 +485,35 @@ mod tests {
         let no_vcpus = 4;
         let gm = single_region_mem(0x10000);
         let mut resource_allocator = ResourceAllocator::new().unwrap();
-        let config_err = configure_system(
-            &gm,
-            &mut resource_allocator,
-            GuestAddress(0),
-            0,
-            &None,
-            1,
-            BootProtocol::LinuxBoot,
-        );
-        assert_eq!(
-            config_err.unwrap_err(),
-            super::ConfigurationError::MpTableSetup(mptable::MptableError::NotEnoughMemory)
-        );
+        let err = mptable::setup_mptable(&gm, &mut resource_allocator, 1);
+        assert!(matches!(
+            err.unwrap_err(),
+            mptable::MptableError::NotEnoughMemory
+        ));
 
         // Now assigning some memory that falls before the 32bit memory hole.
         let mem_size = mib_to_bytes(128);
         let gm = arch_mem(mem_size);
         let mut resource_allocator = ResourceAllocator::new().unwrap();
-        configure_system(
-            &gm,
-            &mut resource_allocator,
-            GuestAddress(0),
-            0,
-            &None,
-            no_vcpus,
-            BootProtocol::LinuxBoot,
-        )
-        .unwrap();
-        configure_system(
-            &gm,
-            &mut resource_allocator,
-            GuestAddress(0),
-            0,
-            &None,
-            no_vcpus,
-            BootProtocol::PvhBoot,
-        )
-        .unwrap();
+        mptable::setup_mptable(&gm, &mut resource_allocator, no_vcpus).unwrap();
+        configure_64bit_boot(&gm, GuestAddress(0), 0, &None).unwrap();
+        configure_pvh(&gm, GuestAddress(0), &None).unwrap();
 
         // Now assigning some memory that is equal to the start of the 32bit memory hole.
         let mem_size = mib_to_bytes(3328);
         let gm = arch_mem(mem_size);
         let mut resource_allocator = ResourceAllocator::new().unwrap();
-        configure_system(
-            &gm,
-            &mut resource_allocator,
-            GuestAddress(0),
-            0,
-            &None,
-            no_vcpus,
-            BootProtocol::LinuxBoot,
-        )
-        .unwrap();
-        configure_system(
-            &gm,
-            &mut resource_allocator,
-            GuestAddress(0),
-            0,
-            &None,
-            no_vcpus,
-            BootProtocol::PvhBoot,
-        )
-        .unwrap();
+        mptable::setup_mptable(&gm, &mut resource_allocator, no_vcpus).unwrap();
+        configure_64bit_boot(&gm, GuestAddress(0), 0, &None).unwrap();
+        configure_pvh(&gm, GuestAddress(0), &None).unwrap();
 
         // Now assigning some memory that falls after the 32bit memory hole.
         let mem_size = mib_to_bytes(3330);
         let gm = arch_mem(mem_size);
         let mut resource_allocator = ResourceAllocator::new().unwrap();
-        configure_system(
-            &gm,
-            &mut resource_allocator,
-            GuestAddress(0),
-            0,
-            &None,
-            no_vcpus,
-            BootProtocol::LinuxBoot,
-        )
-        .unwrap();
-        configure_system(
-            &gm,
-            &mut resource_allocator,
-            GuestAddress(0),
-            0,
-            &None,
-            no_vcpus,
-            BootProtocol::PvhBoot,
-        )
-        .unwrap();
+        mptable::setup_mptable(&gm, &mut resource_allocator, no_vcpus).unwrap();
+        configure_64bit_boot(&gm, GuestAddress(0), 0, &None).unwrap();
+        configure_pvh(&gm, GuestAddress(0), &None).unwrap();
     }
 
     #[test]
