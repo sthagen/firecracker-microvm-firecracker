@@ -57,7 +57,7 @@ use crate::snapshot::Persist;
 use crate::vmm_config::instance_info::InstanceInfo;
 use crate::vmm_config::machine_config::MachineConfigError;
 use crate::vstate::kvm::Kvm;
-use crate::vstate::memory::GuestMemoryMmap;
+use crate::vstate::memory::GuestRegionMmap;
 use crate::vstate::vcpu::{Vcpu, VcpuError};
 use crate::vstate::vm::Vm;
 use crate::{EventManager, Vmm, VmmError, device_manager};
@@ -134,8 +134,6 @@ impl std::convert::From<linux_loader::cmdline::Error> for StartMicrovmError {
 fn create_vmm_and_vcpus(
     instance_info: &InstanceInfo,
     event_manager: &mut EventManager,
-    guest_memory: GuestMemoryMmap,
-    uffd: Option<Uffd>,
     vcpu_count: u8,
     kvm_capabilities: Vec<KvmCapability>,
 ) -> Result<(Vmm, Vec<Vcpu>), VmmError> {
@@ -143,8 +141,6 @@ fn create_vmm_and_vcpus(
     // Set up Kvm Vm and register memory regions.
     // Build custom CPU config if a custom template is provided.
     let mut vm = Vm::new(&kvm)?;
-    kvm.check_memory(&guest_memory)?;
-    vm.memory_init(&guest_memory)?;
 
     let resource_allocator = ResourceAllocator::new()?;
 
@@ -180,8 +176,7 @@ fn create_vmm_and_vcpus(
         shutdown_exit_code: None,
         kvm,
         vm,
-        guest_memory,
-        uffd,
+        uffd: None,
         vcpus_handles: Vec::new(),
         vcpus_exit_evt,
         resource_allocator,
@@ -220,8 +215,6 @@ pub fn build_microvm_for_boot(
         .allocate_guest_memory()
         .map_err(StartMicrovmError::GuestMemory)?;
 
-    let entry_point = load_kernel(&boot_config.kernel_file, &guest_memory)?;
-    let initrd = InitrdConfig::from_config(boot_config, &guest_memory)?;
     // Clone the command-line so that a failed boot doesn't pollute the original.
     #[allow(unused_mut)]
     let mut boot_cmdline = boot_config.cmdline.clone();
@@ -234,11 +227,16 @@ pub fn build_microvm_for_boot(
     let (mut vmm, mut vcpus) = create_vmm_and_vcpus(
         instance_info,
         event_manager,
-        guest_memory,
-        None,
         vm_resources.machine_config.vcpu_count,
         cpu_template.kvm_capabilities.clone(),
     )?;
+
+    vmm.vm
+        .register_memory_regions(guest_memory)
+        .map_err(VmmError::Vm)?;
+
+    let entry_point = load_kernel(&boot_config.kernel_file, vmm.vm.guest_memory())?;
+    let initrd = InitrdConfig::from_config(boot_config, vmm.vm.guest_memory())?;
 
     #[cfg(feature = "gdb")]
     let (gdb_tx, gdb_rx) = mpsc::channel();
@@ -414,7 +412,7 @@ pub fn build_microvm_from_snapshot(
     instance_info: &InstanceInfo,
     event_manager: &mut EventManager,
     microvm_state: MicrovmState,
-    guest_memory: GuestMemoryMmap,
+    guest_memory: Vec<GuestRegionMmap>,
     uffd: Option<Uffd>,
     seccomp_filters: &BpfThreadMap,
     vm_resources: &mut VmResources,
@@ -424,12 +422,16 @@ pub fn build_microvm_from_snapshot(
     let (mut vmm, mut vcpus) = create_vmm_and_vcpus(
         instance_info,
         event_manager,
-        guest_memory,
-        uffd,
         vm_resources.machine_config.vcpu_count,
         microvm_state.kvm_state.kvm_cap_modifiers.clone(),
     )
     .map_err(StartMicrovmError::Internal)?;
+
+    vmm.vm
+        .register_memory_regions(guest_memory)
+        .map_err(VmmError::Vm)
+        .map_err(StartMicrovmError::Internal)?;
+    vmm.uffd = uffd;
 
     #[cfg(target_arch = "x86_64")]
     {
@@ -469,7 +471,7 @@ pub fn build_microvm_from_snapshot(
 
     // Restore devices states.
     let mmio_ctor_args = MMIODevManagerConstructorArgs {
-        mem: &vmm.guest_memory,
+        mem: vmm.vm.guest_memory(),
         vm: vmm.vm.fd(),
         event_manager,
         resource_allocator: &mut vmm.resource_allocator,
@@ -485,7 +487,7 @@ pub fn build_microvm_from_snapshot(
 
     {
         let acpi_ctor_args = ACPIDeviceManagerConstructorArgs {
-            mem: &vmm.guest_memory,
+            mem: vmm.vm.guest_memory(),
             resource_allocator: &mut vmm.resource_allocator,
             vm: vmm.vm.fd(),
         };
@@ -594,7 +596,7 @@ fn attach_virtio_device<T: 'static + VirtioDevice + MutEventSubscriber + Debug>(
     event_manager.add_subscriber(device.clone());
 
     // The device mutex mustn't be locked here otherwise it will deadlock.
-    let device = MmioTransport::new(vmm.guest_memory.clone(), device, is_vhost_user);
+    let device = MmioTransport::new(vmm.vm.guest_memory().clone(), device, is_vhost_user);
     vmm.mmio_device_manager
         .register_mmio_virtio_for_boot(
             vmm.vm.fd(),
@@ -619,7 +621,7 @@ pub(crate) fn attach_boot_timer_device(
 }
 
 fn attach_vmgenid_device(vmm: &mut Vmm) -> Result<(), StartMicrovmError> {
-    let vmgenid = VmGenId::new(&vmm.guest_memory, &mut vmm.resource_allocator)
+    let vmgenid = VmGenId::new(vmm.vm.guest_memory(), &mut vmm.resource_allocator)
         .map_err(StartMicrovmError::CreateVMGenID)?;
 
     vmm.acpi_device_manager
@@ -814,7 +816,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn default_vmm() -> Vmm {
-        let (kvm, mut vm, guest_memory) = setup_vm_with_memory(mib_to_bytes(128));
+        let (kvm, mut vm) = setup_vm_with_memory(mib_to_bytes(128));
 
         let mmio_device_manager = MMIODeviceManager::new();
         let acpi_device_manager = ACPIDeviceManager::new();
@@ -842,7 +844,6 @@ pub(crate) mod tests {
             shutdown_exit_code: None,
             kvm,
             vm,
-            guest_memory,
             uffd: None,
             vcpus_handles: Vec::new(),
             vcpus_exit_evt,
