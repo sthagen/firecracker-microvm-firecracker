@@ -1,19 +1,21 @@
+// Copyright 2025 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // Copyright © 2019 Intel Corporation
 //
 // SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
 //
 
 use std::sync::Arc;
-use std::{io, result};
 
 use byteorder::{ByteOrder, LittleEndian};
+use pci::PciCapabilityId;
 use serde::{Deserialize, Serialize};
-use vm_device::interrupt::{
-    InterruptIndex, InterruptSourceConfig, InterruptSourceGroup, MsiIrqSourceConfig,
-};
 use vm_memory::ByteValued;
 
-use crate::{PciCapability, PciCapabilityId};
+use crate::Vm;
+use crate::logger::{debug, error, warn};
+use crate::pci::configuration::PciCapability;
+use crate::snapshot::Persist;
+use crate::vstate::interrupts::{InterruptError, MsixVectorConfig, MsixVectorGroup};
 
 const MAX_MSIX_VECTORS_PER_DEVICE: u16 = 2048;
 const MSIX_TABLE_ENTRIES_MODULO: u64 = 16;
@@ -22,23 +24,21 @@ const BITS_PER_PBA_ENTRY: usize = 64;
 const FUNCTION_MASK_BIT: u8 = 14;
 const MSIX_ENABLE_BIT: u8 = 15;
 
-#[derive(Debug, thiserror::Error, displaydoc::Display)]
-pub enum Error {
-    /// Failed enabling the interrupt route.
-    EnableInterruptRoute(io::Error),
-    /// Failed updating the interrupt route.
-    UpdateInterruptRoute(io::Error),
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+/// MSI-X table entries
 pub struct MsixTableEntry {
+    /// Lower 32 bits of the vector address
     pub msg_addr_lo: u32,
+    /// Upper 32 bits of the vector address
     pub msg_addr_hi: u32,
+    /// Vector data
     pub msg_data: u32,
+    /// Enable/Disable and (un)masking control
     pub vector_ctl: u32,
 }
 
 impl MsixTableEntry {
+    /// Returns `true` if the vector is masked
     pub fn masked(&self) -> bool {
         self.vector_ctl & 0x1 == 0x1
     }
@@ -56,19 +56,28 @@ impl Default for MsixTableEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// State for (de)serializing MSI-X configuration
 pub struct MsixConfigState {
     table_entries: Vec<MsixTableEntry>,
     pba_entries: Vec<u64>,
     masked: bool,
     enabled: bool,
+    vectors: Vec<u32>,
 }
 
+/// MSI-X configuration
 pub struct MsixConfig {
+    /// Vector table entries
     pub table_entries: Vec<MsixTableEntry>,
+    /// Pending bit array
     pub pba_entries: Vec<u64>,
+    /// Id of the device using this set of vectors
     pub devid: u32,
-    pub interrupt_source_group: Arc<dyn InterruptSourceGroup>,
+    /// Interrupts vectors used
+    pub vectors: Arc<MsixVectorGroup>,
+    /// Whether vectors are masked
     pub masked: bool,
+    /// Whether vectors are enabled
     pub enabled: bool,
 }
 
@@ -85,78 +94,73 @@ impl std::fmt::Debug for MsixConfig {
 }
 
 impl MsixConfig {
-    pub fn new(
-        msix_vectors: u16,
-        interrupt_source_group: Arc<dyn InterruptSourceGroup>,
-        devid: u32,
-        state: Option<MsixConfigState>,
-    ) -> result::Result<Self, Error> {
-        assert!(msix_vectors <= MAX_MSIX_VECTORS_PER_DEVICE);
+    /// Create a new MSI-X configuration
+    pub fn new(vectors: Arc<MsixVectorGroup>, devid: u32) -> Self {
+        assert!(vectors.num_vectors() <= MAX_MSIX_VECTORS_PER_DEVICE);
 
-        let (table_entries, pba_entries, masked, enabled) = if let Some(state) = state {
-            if state.enabled && !state.masked {
-                for (idx, table_entry) in state.table_entries.iter().enumerate() {
-                    if table_entry.masked() {
-                        continue;
-                    }
+        let mut table_entries: Vec<MsixTableEntry> = Vec::new();
+        table_entries.resize_with(vectors.num_vectors() as usize, Default::default);
+        let mut pba_entries: Vec<u64> = Vec::new();
+        let num_pba_entries: usize = (vectors.num_vectors() as usize).div_ceil(BITS_PER_PBA_ENTRY);
+        pba_entries.resize_with(num_pba_entries, Default::default);
 
-                    let config = MsiIrqSourceConfig {
-                        high_addr: table_entry.msg_addr_hi,
-                        low_addr: table_entry.msg_addr_lo,
-                        data: table_entry.msg_data,
-                        devid,
-                    };
-
-                    interrupt_source_group
-                        .update(
-                            idx as InterruptIndex,
-                            InterruptSourceConfig::MsiIrq(config),
-                            state.masked,
-                            true,
-                        )
-                        .map_err(Error::UpdateInterruptRoute)?;
-
-                    interrupt_source_group
-                        .enable()
-                        .map_err(Error::EnableInterruptRoute)?;
-                }
-            }
-
-            (
-                state.table_entries,
-                state.pba_entries,
-                state.masked,
-                state.enabled,
-            )
-        } else {
-            let mut table_entries: Vec<MsixTableEntry> = Vec::new();
-            table_entries.resize_with(msix_vectors as usize, Default::default);
-            let mut pba_entries: Vec<u64> = Vec::new();
-            let num_pba_entries: usize = (msix_vectors as usize).div_ceil(BITS_PER_PBA_ENTRY);
-            pba_entries.resize_with(num_pba_entries, Default::default);
-
-            (table_entries, pba_entries, true, false)
-        };
-
-        Ok(MsixConfig {
+        MsixConfig {
             table_entries,
             pba_entries,
             devid,
-            interrupt_source_group,
-            masked,
-            enabled,
+            vectors,
+            masked: true,
+            enabled: false,
+        }
+    }
+
+    /// Create an MSI-X configuration from snapshot state
+    pub fn from_state(
+        state: MsixConfigState,
+        vm: Arc<Vm>,
+        devid: u32,
+    ) -> Result<Self, InterruptError> {
+        let vectors = Arc::new(MsixVectorGroup::restore(vm, &state.vectors)?);
+        if state.enabled && !state.masked {
+            for (idx, table_entry) in state.table_entries.iter().enumerate() {
+                if table_entry.masked() {
+                    continue;
+                }
+
+                let config = MsixVectorConfig {
+                    high_addr: table_entry.msg_addr_hi,
+                    low_addr: table_entry.msg_addr_lo,
+                    data: table_entry.msg_data,
+                    devid,
+                };
+
+                vectors.update(idx, config, state.masked, true)?;
+                vectors.enable()?;
+            }
+        }
+
+        Ok(MsixConfig {
+            table_entries: state.table_entries,
+            pba_entries: state.pba_entries,
+            devid,
+            vectors,
+            masked: state.masked,
+            enabled: state.enabled,
         })
     }
 
+    /// Create the state object for serializing MSI-X vectors
     pub fn state(&self) -> MsixConfigState {
         MsixConfigState {
             table_entries: self.table_entries.clone(),
             pba_entries: self.pba_entries.clone(),
             masked: self.masked,
             enabled: self.enabled,
+            vectors: self.vectors.save(),
         }
     }
 
+    /// Set the MSI-X control message (enable/disable, (un)mask)
     pub fn set_msg_ctl(&mut self, reg: u16) {
         let old_masked = self.masked;
         let old_enabled = self.enabled;
@@ -169,25 +173,20 @@ impl MsixConfig {
             if self.enabled && !self.masked {
                 debug!("MSI-X enabled for device 0x{:x}", self.devid);
                 for (idx, table_entry) in self.table_entries.iter().enumerate() {
-                    let config = MsiIrqSourceConfig {
+                    let config = MsixVectorConfig {
                         high_addr: table_entry.msg_addr_hi,
                         low_addr: table_entry.msg_addr_lo,
                         data: table_entry.msg_data,
                         devid: self.devid,
                     };
 
-                    if let Err(e) = self.interrupt_source_group.update(
-                        idx as InterruptIndex,
-                        InterruptSourceConfig::MsiIrq(config),
-                        table_entry.masked(),
-                        true,
-                    ) {
+                    if let Err(e) = self.vectors.update(idx, config, table_entry.masked(), true) {
                         error!("Failed updating vector: {:?}", e);
                     }
                 }
             } else if old_enabled || !old_masked {
                 debug!("MSI-X disabled for device 0x{:x}", self.devid);
-                if let Err(e) = self.interrupt_source_group.disable() {
+                if let Err(e) = self.vectors.disable() {
                     error!("Failed disabling irq_fd: {:?}", e);
                 }
             }
@@ -199,13 +198,14 @@ impl MsixConfig {
         // masked.
         if old_masked && !self.masked {
             for (index, entry) in self.table_entries.clone().iter().enumerate() {
-                if !entry.masked() && self.get_pba_bit(index as u16) == 1 {
+                if !entry.masked() && self.get_pba_bit(index.try_into().unwrap()) == 1 {
                     self.inject_msix_and_clear_pba(index);
                 }
             }
         }
     }
 
+    /// Read an MSI-X table entry
     pub fn read_table(&self, offset: u64, data: &mut [u8]) {
         assert!(data.len() <= 8);
 
@@ -258,6 +258,7 @@ impl MsixConfig {
         }
     }
 
+    /// Write an MSI-X table entry
     pub fn write_table(&mut self, offset: u64, data: &[u8]) {
         assert!(data.len() <= 8);
 
@@ -314,19 +315,17 @@ impl MsixConfig {
         // this is safe because if the entry is masked (starts masked as per spec)
         // in the table then it won't be triggered.
         if self.enabled && !self.masked && !table_entry.masked() {
-            let config = MsiIrqSourceConfig {
+            let config = MsixVectorConfig {
                 high_addr: table_entry.msg_addr_hi,
                 low_addr: table_entry.msg_addr_lo,
                 data: table_entry.msg_data,
                 devid: self.devid,
             };
 
-            if let Err(e) = self.interrupt_source_group.update(
-                index as InterruptIndex,
-                InterruptSourceConfig::MsiIrq(config),
-                table_entry.masked(),
-                true,
-            ) {
+            if let Err(e) = self
+                .vectors
+                .update(index, config, table_entry.masked(), true)
+            {
                 error!("Failed updating vector: {:?}", e);
             }
         }
@@ -344,12 +343,13 @@ impl MsixConfig {
             && self.enabled
             && old_entry.masked()
             && !table_entry.masked()
-            && self.get_pba_bit(index as u16) == 1
+            && self.get_pba_bit(index.try_into().unwrap()) == 1
         {
             self.inject_msix_and_clear_pba(index);
         }
     }
 
+    /// Read a pending bit array entry
     pub fn read_pba(&self, offset: u64, data: &mut [u8]) {
         let index: usize = (offset / MSIX_PBA_ENTRIES_MODULO) as usize;
         let modulo_offset = offset % MSIX_PBA_ENTRIES_MODULO;
@@ -391,10 +391,12 @@ impl MsixConfig {
         }
     }
 
+    /// Write a pending bit array entry
     pub fn write_pba(&mut self, _offset: u64, _data: &[u8]) {
         error!("Pending Bit Array is read only");
     }
 
+    /// Set PBA bit for a vector
     pub fn set_pba_bit(&mut self, vector: u16, reset: bool) {
         assert!(vector < MAX_MSIX_VECTORS_PER_DEVICE);
 
@@ -414,6 +416,7 @@ impl MsixConfig {
         }
     }
 
+    /// Get the PBA bit for a vector
     fn get_pba_bit(&self, vector: u16) -> u8 {
         assert!(vector < MAX_MSIX_VECTORS_PER_DEVICE);
 
@@ -427,38 +430,36 @@ impl MsixConfig {
         ((self.pba_entries[index] >> shift) & 0x0000_0001u64) as u8
     }
 
+    /// Inject an MSI-X interrupt and clear the PBA bit for a vector
     fn inject_msix_and_clear_pba(&mut self, vector: usize) {
         // Inject the MSI message
-        match self
-            .interrupt_source_group
-            .trigger(vector as InterruptIndex)
-        {
+        match self.vectors.trigger(vector) {
             Ok(_) => debug!("MSI-X injected on vector control flip"),
             Err(e) => error!("failed to inject MSI-X: {}", e),
         }
 
         // Clear the bit from PBA
-        self.set_pba_bit(vector as u16, true);
+        self.set_pba_bit(vector.try_into().unwrap(), true);
     }
 }
 
-#[allow(dead_code)]
 #[repr(C, packed)]
-#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+/// MSI-X PCI capability
 pub struct MsixCap {
-    // Message Control Register
-    //   10-0:  MSI-X Table size
-    //   13-11: Reserved
-    //   14:    Mask. Mask all MSI-X when set.
-    //   15:    Enable. Enable all MSI-X when set.
+    /// Message Control Register
+    ///   10-0:  MSI-X Table size
+    ///   13-11: Reserved
+    ///   14:    Mask. Mask all MSI-X when set.
+    ///   15:    Enable. Enable all MSI-X when set.
     pub msg_ctl: u16,
-    // Table. Contains the offset and the BAR indicator (BIR)
-    //   2-0:  Table BAR indicator (BIR). Can be 0 to 5.
-    //   31-3: Table offset in the BAR pointed by the BIR.
+    /// Table. Contains the offset and the BAR indicator (BIR)
+    ///   2-0:  Table BAR indicator (BIR). Can be 0 to 5.
+    ///   31-3: Table offset in the BAR pointed by the BIR.
     pub table: u32,
-    // Pending Bit Array. Contains the offset and the BAR indicator (BIR)
-    //   2-0:  PBA BAR indicator (BIR). Can be 0 to 5.
-    //   31-3: PBA offset in the BAR pointed by the BIR.
+    /// Pending Bit Array. Contains the offset and the BAR indicator (BIR)
+    ///   2-0:  PBA BAR indicator (BIR). Can be 0 to 5.
+    ///   31-3: PBA offset in the BAR pointed by the BIR.
     pub pba: u32,
 }
 
@@ -476,6 +477,7 @@ impl PciCapability for MsixCap {
 }
 
 impl MsixCap {
+    /// Create a new MSI-X capability object
     pub fn new(
         table_pci_bar: u8,
         table_size: u16,
@@ -498,76 +500,25 @@ impl MsixCap {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use vmm_sys_util::eventfd::EventFd;
-
     use super::*;
+    use crate::builder::tests::default_vmm;
+    use crate::logger::{IncMetric, METRICS};
+    use crate::{Vm, check_metric_after_block};
 
-    #[derive(Debug)]
-    struct MockInterrupt {
-        trigger_cnt: [AtomicUsize; 2],
-        update_cnt: [AtomicUsize; 2],
-        event_fd: [EventFd; 2],
-    }
-
-    impl MockInterrupt {
-        fn new() -> Self {
-            MockInterrupt {
-                trigger_cnt: [AtomicUsize::new(0), AtomicUsize::new(0)],
-                update_cnt: [AtomicUsize::new(0), AtomicUsize::new(0)],
-                event_fd: [
-                    EventFd::new(libc::EFD_NONBLOCK).unwrap(),
-                    EventFd::new(libc::EFD_NONBLOCK).unwrap(),
-                ],
-            }
-        }
-
-        fn interrupt_cnt(&self, index: InterruptIndex) -> usize {
-            self.trigger_cnt[index as usize].load(Ordering::SeqCst)
-        }
-
-        fn update_cnt(&self, index: InterruptIndex) -> usize {
-            self.update_cnt[index as usize].load(Ordering::SeqCst)
-        }
-    }
-
-    impl InterruptSourceGroup for MockInterrupt {
-        fn trigger(&self, index: InterruptIndex) -> vm_device::interrupt::Result<()> {
-            self.trigger_cnt[index as usize].fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn notifier(&self, index: InterruptIndex) -> Option<&EventFd> {
-            self.event_fd.get(index as usize)
-        }
-
-        fn update(
-            &self,
-            index: InterruptIndex,
-            _config: InterruptSourceConfig,
-            _masked: bool,
-            _set_gsi: bool,
-        ) -> vm_device::interrupt::Result<()> {
-            self.update_cnt[index as usize].fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn set_gsi(&self) -> vm_device::interrupt::Result<()> {
-            Ok(())
-        }
+    fn msix_vector_group(nr_vectors: u16) -> Arc<MsixVectorGroup> {
+        let vmm = default_vmm();
+        Arc::new(Vm::create_msix_group(vmm.vm.clone(), nr_vectors).unwrap())
     }
 
     #[test]
     #[should_panic]
     fn test_too_many_vectors() {
-        MsixConfig::new(2049, Arc::new(MockInterrupt::new()), 0x42, None).unwrap();
+        MsixConfig::new(msix_vector_group(2049), 0x42);
     }
 
     #[test]
     fn test_new_msix_config() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let config = MsixConfig::new(msix_vector_group(2), 0x42);
         assert_eq!(config.devid, 0x42);
         assert!(config.masked);
         assert!(!config.enabled);
@@ -577,8 +528,7 @@ mod tests {
 
     #[test]
     fn test_enable_msix_vectors() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let mut config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let mut config = MsixConfig::new(msix_vector_group(2), 0x42);
 
         assert!(!config.enabled);
         assert!(config.masked);
@@ -605,8 +555,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_table_access_read_too_big() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let config = MsixConfig::new(msix_vector_group(2), 0x42);
         let mut buffer = [0u8; 16];
 
         config.read_table(0, &mut buffer);
@@ -614,8 +563,7 @@ mod tests {
 
     #[test]
     fn test_read_table_past_end() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let config = MsixConfig::new(msix_vector_group(2), 0x42);
         let mut buffer = [0u8; 8];
 
         // We have 2 vectors (16 bytes each), so we should be able to read up to 32 bytes.
@@ -626,8 +574,7 @@ mod tests {
 
     #[test]
     fn test_read_table_bad_length() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let config = MsixConfig::new(msix_vector_group(2), 0x42);
         let mut buffer = [0u8; 8];
 
         // We can either read 4 or 8 bytes
@@ -653,45 +600,56 @@ mod tests {
 
     #[test]
     fn test_access_table() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let mut config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let mut config = MsixConfig::new(msix_vector_group(2), 0x42);
         // enabled and not masked
-        config.set_msg_ctl(0x8000);
-        assert_eq!(vectors.update_cnt(0), 1);
-        assert_eq!(vectors.update_cnt(1), 1);
+        check_metric_after_block!(
+            METRICS.interrupts.config_updates,
+            2,
+            config.set_msg_ctl(0x8000)
+        );
         let mut buffer = [0u8; 8];
 
         // Write first vector's address with a single 8-byte write
-        config.write_table(0, &u64::to_le_bytes(0x0000_1312_0000_1110));
         // It's still masked so shouldn't be updated
-        assert_eq!(vectors.update_cnt(0), 1);
-        assert_eq!(vectors.update_cnt(1), 1);
+        check_metric_after_block!(
+            METRICS.interrupts.config_updates,
+            0,
+            config.write_table(0, &u64::to_le_bytes(0x0000_1312_0000_1110))
+        );
+
         // Same for control and message data
-        config.write_table(8, &u64::to_le_bytes(0x0_0000_0020));
         // Now, we enabled it, so we should see an update
-        assert_eq!(vectors.update_cnt(0), 2);
-        assert_eq!(vectors.update_cnt(1), 1);
+        check_metric_after_block!(
+            METRICS.interrupts.config_updates,
+            1,
+            config.write_table(8, &u64::to_le_bytes(0x0_0000_0020))
+        );
 
         // Write second vector's fields with 4-byte writes
-        // low 32 bits of the address
-        config.write_table(16, &u32::to_le_bytes(0x4241));
-        assert_eq!(vectors.update_cnt(0), 2);
-        // Still masked
-        assert_eq!(vectors.update_cnt(1), 1);
-        // high 32 bits of the address
-        config.write_table(20, &u32::to_le_bytes(0x4443));
-        assert_eq!(vectors.update_cnt(0), 2);
-        // Still masked
-        assert_eq!(vectors.update_cnt(1), 1);
-        // message data
-        config.write_table(24, &u32::to_le_bytes(0x21));
-        assert_eq!(vectors.update_cnt(0), 2);
-        // Still masked
-        assert_eq!(vectors.update_cnt(1), 1);
-        // vector control
-        config.write_table(28, &u32::to_le_bytes(0x0));
-        assert_eq!(vectors.update_cnt(0), 2);
-        assert_eq!(vectors.update_cnt(1), 2);
+        // low 32 bits of the address (still masked)
+        check_metric_after_block!(
+            METRICS.interrupts.config_updates,
+            0,
+            config.write_table(16, &u32::to_le_bytes(0x4241))
+        );
+        // high 32 bits of the address (still masked)
+        check_metric_after_block!(
+            METRICS.interrupts.config_updates,
+            0,
+            config.write_table(20, &u32::to_le_bytes(0x4443))
+        );
+        // message data (still masked)
+        check_metric_after_block!(
+            METRICS.interrupts.config_updates,
+            0,
+            config.write_table(24, &u32::to_le_bytes(0x21))
+        );
+        // vector control (now unmasked)
+        check_metric_after_block!(
+            METRICS.interrupts.config_updates,
+            1,
+            config.write_table(28, &u32::to_le_bytes(0x0))
+        );
 
         assert_eq!(config.table_entries[0].msg_addr_hi, 0x1312);
         assert_eq!(config.table_entries[0].msg_addr_lo, 0x1110);
@@ -738,29 +696,28 @@ mod tests {
         assert_eq!(0x0_0000_0020, u64::from_le_bytes(buffer));
 
         // If we mask the interrupts we shouldn't see any update
-        config.write_table(12, &u32::to_le_bytes(0x1));
-        config.write_table(28, &u32::to_le_bytes(0x1));
-        assert_eq!(vectors.update_cnt(0), 2);
-        assert_eq!(vectors.update_cnt(1), 2);
+        check_metric_after_block!(METRICS.interrupts.config_updates, 0, {
+            config.write_table(12, &u32::to_le_bytes(0x1));
+            config.write_table(28, &u32::to_le_bytes(0x1));
+        });
 
         // Un-masking them should update them
-        config.write_table(12, &u32::to_le_bytes(0x0));
-        config.write_table(28, &u32::to_le_bytes(0x0));
-        assert_eq!(vectors.update_cnt(0), 3);
-        assert_eq!(vectors.update_cnt(1), 3);
+        check_metric_after_block!(METRICS.interrupts.config_updates, 2, {
+            config.write_table(12, &u32::to_le_bytes(0x0));
+            config.write_table(28, &u32::to_le_bytes(0x0));
+        });
 
         // Setting up the same config should have no effect
-        config.write_table(12, &u32::to_le_bytes(0x0));
-        config.write_table(28, &u32::to_le_bytes(0x0));
-        assert_eq!(vectors.update_cnt(0), 3);
-        assert_eq!(vectors.update_cnt(1), 3);
+        check_metric_after_block!(METRICS.interrupts.config_updates, 0, {
+            config.write_table(12, &u32::to_le_bytes(0x0));
+            config.write_table(28, &u32::to_le_bytes(0x0));
+        });
     }
 
     #[test]
     #[should_panic]
     fn test_table_access_write_too_big() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let mut config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let mut config = MsixConfig::new(msix_vector_group(2), 0x42);
         let buffer = [0u8; 16];
 
         config.write_table(0, &buffer);
@@ -768,8 +725,7 @@ mod tests {
 
     #[test]
     fn test_pba_read_too_big() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let config = MsixConfig::new(msix_vector_group(2), 0x42);
         let mut buffer = [0u8; 16];
 
         config.read_pba(0, &mut buffer);
@@ -778,8 +734,7 @@ mod tests {
 
     #[test]
     fn test_pba_invalid_offset() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let config = MsixConfig::new(msix_vector_group(2), 0x42);
         let mut buffer = [0u8; 8];
 
         // Past the end of the PBA array
@@ -797,8 +752,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_set_pba_bit_vector_too_big() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let mut config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let mut config = MsixConfig::new(msix_vector_group(2), 0x42);
 
         config.set_pba_bit(2048, false);
     }
@@ -806,16 +760,14 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_get_pba_bit_vector_too_big() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let config = MsixConfig::new(msix_vector_group(2), 0x42);
 
         config.get_pba_bit(2048);
     }
 
     #[test]
     fn test_pba_bit_invalid_vector() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let mut config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let mut config = MsixConfig::new(msix_vector_group(2), 0x42);
 
         // We have two vectors, so setting the pending bit for the third one
         // should be ignored
@@ -828,8 +780,7 @@ mod tests {
 
     #[test]
     fn test_pba_read() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let mut config = MsixConfig::new(128, vectors.clone(), 0x42, None).unwrap();
+        let mut config = MsixConfig::new(msix_vector_group(128), 0x42);
         let mut buffer = [0u8; 8];
 
         config.set_pba_bit(1, false);
@@ -850,40 +801,33 @@ mod tests {
 
     #[test]
     fn test_pending_interrupt() {
-        let vectors = Arc::new(MockInterrupt::new());
-        let mut config = MsixConfig::new(2, vectors.clone(), 0x42, None).unwrap();
+        let mut config = MsixConfig::new(msix_vector_group(2), 0x42);
         config.set_pba_bit(1, false);
         assert_eq!(config.get_pba_bit(1), 1);
         // Enable MSI-X vector and unmask interrupts
-        config.set_msg_ctl(0x8000);
-
         // Individual vectors are still masked, so no change
-        assert_eq!(vectors.interrupt_cnt(0), 0);
-        assert_eq!(vectors.interrupt_cnt(1), 0);
+        check_metric_after_block!(METRICS.interrupts.triggers, 0, config.set_msg_ctl(0x8000));
 
         // Enable all vectors
-        config.write_table(8, &u64::to_le_bytes(0x0_0000_0020));
-        config.write_table(24, &u64::to_le_bytes(0x0_0000_0020));
-
         // Vector one had a pending bit, so we must have triggered an interrupt for it
         // and cleared the pending bit
-        assert_eq!(vectors.interrupt_cnt(0), 0);
-        assert_eq!(vectors.interrupt_cnt(1), 1);
+        check_metric_after_block!(METRICS.interrupts.triggers, 1, {
+            config.write_table(8, &u64::to_le_bytes(0x0_0000_0020));
+            config.write_table(24, &u64::to_le_bytes(0x0_0000_0020));
+        });
         assert_eq!(config.get_pba_bit(1), 0);
 
         // Check that interrupt is sent as well for enabled vectors once we unmask from
         // Message Control
 
         // Mask vectors and set pending bit for vector 0
-        config.set_msg_ctl(0xc000);
-        config.set_pba_bit(0, false);
-        assert_eq!(vectors.interrupt_cnt(0), 0);
-        assert_eq!(vectors.interrupt_cnt(1), 1);
+        check_metric_after_block!(METRICS.interrupts.triggers, 0, {
+            config.set_msg_ctl(0xc000);
+            config.set_pba_bit(0, false);
+        });
 
         // Unmask them
-        config.set_msg_ctl(0x8000);
-        assert_eq!(vectors.interrupt_cnt(0), 1);
-        assert_eq!(vectors.interrupt_cnt(1), 1);
+        check_metric_after_block!(METRICS.interrupts.triggers, 1, config.set_msg_ctl(0x8000));
         assert_eq!(config.get_pba_bit(0), 0);
     }
 }

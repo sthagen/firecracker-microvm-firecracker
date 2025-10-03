@@ -15,8 +15,10 @@ use super::{VirtioInterrupt, VirtioInterruptType};
 use crate::devices::virtio::device::VirtioDevice;
 use crate::devices::virtio::device_status;
 use crate::devices::virtio::queue::Queue;
-use crate::logger::{error, warn};
+use crate::logger::{IncMetric, METRICS, error, warn};
 use crate::utils::byte_order;
+use crate::vstate::bus::BusDevice;
+use crate::vstate::interrupts::InterruptError;
 use crate::vstate::memory::{GuestAddress, GuestMemoryMmap};
 
 // TODO crosvm uses 0 here, but IIRC virtio specified some other vendor id that should be used
@@ -232,7 +234,7 @@ impl MmioTransport {
     }
 }
 
-impl vm_device::BusDevice for MmioTransport {
+impl BusDevice for MmioTransport {
     fn read(&mut self, base: u64, offset: u64, data: &mut [u8]) {
         match offset {
             0x00..=0xff if data.len() == 4 => {
@@ -399,17 +401,19 @@ impl Default for IrqTrigger {
 }
 
 impl VirtioInterrupt for IrqTrigger {
-    fn trigger(&self, interrupt_type: VirtioInterruptType) -> Result<(), std::io::Error> {
+    fn trigger(&self, interrupt_type: VirtioInterruptType) -> Result<(), InterruptError> {
+        METRICS.interrupts.triggers.inc();
         match interrupt_type {
             VirtioInterruptType::Config => self.trigger_irq(IrqType::Config),
             VirtioInterruptType::Queue(_) => self.trigger_irq(IrqType::Vring),
         }
     }
 
-    fn trigger_queues(&self, queues: &[u16]) -> Result<(), std::io::Error> {
+    fn trigger_queues(&self, queues: &[u16]) -> Result<(), InterruptError> {
         if queues.is_empty() {
             Ok(())
         } else {
+            METRICS.interrupts.triggers.inc();
             self.trigger_irq(IrqType::Vring)
         }
     }
@@ -449,7 +453,7 @@ impl IrqTrigger {
         }
     }
 
-    fn trigger_irq(&self, irq_type: IrqType) -> Result<(), std::io::Error> {
+    fn trigger_irq(&self, irq_type: IrqType) -> Result<(), InterruptError> {
         let irq = match irq_type {
             IrqType::Config => VIRTIO_MMIO_INT_CONFIG,
             IrqType::Vring => VIRTIO_MMIO_INT_VRING,
@@ -470,7 +474,6 @@ pub(crate) mod tests {
 
     use std::ops::Deref;
 
-    use vm_device::BusDevice;
     use vmm_sys_util::eventfd::EventFd;
 
     use super::*;
