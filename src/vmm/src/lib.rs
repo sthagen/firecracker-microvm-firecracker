@@ -140,6 +140,7 @@ use crate::devices::virtio::balloon::{
 };
 use crate::devices::virtio::block::BlockError;
 use crate::devices::virtio::block::device::Block;
+use crate::devices::virtio::mem::{VIRTIO_MEM_DEV_ID, VirtioMem, VirtioMemError, VirtioMemStatus};
 use crate::devices::virtio::net::Net;
 use crate::logger::{METRICS, MetricsError, error, info, warn};
 use crate::persist::{MicrovmState, MicrovmStateError, VmInfo};
@@ -252,6 +253,8 @@ pub enum VmmError {
     Block(#[from] BlockError),
     /// Balloon: {0}
     Balloon(#[from] BalloonError),
+    /// Failed to create memory hotplug device: {0}
+    VirtioMem(#[from] VirtioMemError),
 }
 
 /// Shorthand type for KVM dirty page bitmap.
@@ -600,6 +603,23 @@ impl Vmm {
             .with_virtio_device(BALLOON_DEV_ID, |dev: &mut Balloon| {
                 dev.update_stats_polling_interval(stats_polling_interval_s)
             })??;
+        Ok(())
+    }
+
+    /// Returns the current state of the memory hotplug device.
+    pub fn memory_hotplug_status(&self) -> Result<VirtioMemStatus, VmmError> {
+        self.device_manager
+            .with_virtio_device(VIRTIO_MEM_DEV_ID, |dev: &mut VirtioMem| dev.status())
+            .map_err(VmmError::FindDeviceError)
+    }
+
+    /// Returns the current state of the memory hotplug device.
+    pub fn update_memory_hotplug_size(&self, requested_size_mib: usize) -> Result<(), VmmError> {
+        self.device_manager
+            .with_virtio_device(VIRTIO_MEM_DEV_ID, |dev: &mut VirtioMem| {
+                dev.update_requested_size(requested_size_mib)
+            })
+            .map_err(VmmError::FindDeviceError)??;
         Ok(())
     }
 

@@ -14,6 +14,7 @@ use super::{Vmm, VmmError};
 use crate::EventManager;
 use crate::builder::StartMicrovmError;
 use crate::cpu_config::templates::{CustomCpuTemplate, GuestConfigError};
+use crate::devices::virtio::mem::VirtioMemStatus;
 use crate::logger::{LoggerConfig, info, warn, *};
 use crate::mmds::data_store::{self, Mmds};
 use crate::persist::{CreateSnapshotError, RestoreFromSnapshotError, VmInfo};
@@ -28,6 +29,9 @@ use crate::vmm_config::drive::{BlockDeviceConfig, BlockDeviceUpdateConfig, Drive
 use crate::vmm_config::entropy::{EntropyDeviceConfig, EntropyDeviceError};
 use crate::vmm_config::instance_info::InstanceInfo;
 use crate::vmm_config::machine_config::{MachineConfig, MachineConfigError, MachineConfigUpdate};
+use crate::vmm_config::memory_hotplug::{
+    MemoryHotplugConfig, MemoryHotplugConfigError, MemoryHotplugSizeUpdate,
+};
 use crate::vmm_config::metrics::{MetricsConfig, MetricsConfigError};
 use crate::vmm_config::mmds::{MmdsConfig, MmdsConfigError};
 use crate::vmm_config::net::{
@@ -109,6 +113,14 @@ pub enum VmmAction {
     /// Set the entropy device using `EntropyDeviceConfig` as input. This action can only be called
     /// before the microVM has booted.
     SetEntropyDevice(EntropyDeviceConfig),
+    /// Get the memory hotplug device configuration and status.
+    GetMemoryHotplugStatus,
+    /// Set the memory hotplug device using `MemoryHotplugConfig` as input. This action can only be
+    /// called before the microVM has booted.
+    SetMemoryHotplugDevice(MemoryHotplugConfig),
+    /// Updates the memory hotplug device using `MemoryHotplugConfigUpdate` as input. This action
+    /// can only be called after the microVM has booted.
+    UpdateMemoryHotplugSize(MemoryHotplugSizeUpdate),
     /// Launch the microVM. This action can only be called before the microVM has booted.
     StartMicroVm,
     /// Send CTRL+ALT+DEL to the microVM, using the i8042 keyboard function. If an AT-keyboard
@@ -148,6 +160,10 @@ pub enum VmmActionError {
     EntropyDevice(#[from] EntropyDeviceError),
     /// Pmem device error: {0}
     PmemDevice(#[from] PmemConfigError),
+    /// Memory hotplug config error: {0}
+    MemoryHotplugConfig(#[from] MemoryHotplugConfigError),
+    /// Memory hotplug update error: {0}
+    MemoryHotplugUpdate(VmmError),
     /// Internal VMM error: {0}
     InternalVmm(#[from] VmmError),
     /// Load snapshot error: {0}
@@ -201,6 +217,8 @@ pub enum VmmData {
     InstanceInformation(InstanceInfo),
     /// The microVM version.
     VmmVersion(String),
+    /// The status of the memory hotplug device.
+    VirtioMemStatus(VirtioMemStatus),
 }
 
 /// Trait used for deduplicating the MMDS request handling across the two ApiControllers.
@@ -453,15 +471,18 @@ impl<'a> PrebootApiController<'a> {
             StartMicroVm => self.start_microvm(),
             UpdateMachineConfiguration(config) => self.update_machine_config(config),
             SetEntropyDevice(config) => self.set_entropy_device(config),
+            SetMemoryHotplugDevice(config) => self.set_memory_hotplug_device(config),
             // Operations not allowed pre-boot.
             CreateSnapshot(_)
             | FlushMetrics
             | Pause
             | Resume
             | GetBalloonStats
+            | GetMemoryHotplugStatus
             | UpdateBalloon(_)
             | UpdateBalloonStatistics(_)
             | UpdateBlockDevice(_)
+            | UpdateMemoryHotplugSize(_)
             | UpdateNetworkInterface(_) => Err(VmmActionError::OperationNotSupportedPreBoot),
             #[cfg(target_arch = "x86_64")]
             SendCtrlAltDel => Err(VmmActionError::OperationNotSupportedPreBoot),
@@ -557,6 +578,15 @@ impl<'a> PrebootApiController<'a> {
     fn set_entropy_device(&mut self, cfg: EntropyDeviceConfig) -> Result<VmmData, VmmActionError> {
         self.boot_path = true;
         self.vm_resources.build_entropy_device(cfg)?;
+        Ok(VmmData::Empty)
+    }
+
+    fn set_memory_hotplug_device(
+        &mut self,
+        cfg: MemoryHotplugConfig,
+    ) -> Result<VmmData, VmmActionError> {
+        self.boot_path = true;
+        self.vm_resources.set_memory_hotplug_config(cfg)?;
         Ok(VmmData::Empty)
     }
 
@@ -662,6 +692,13 @@ impl RuntimeApiController {
                 .map(VmmData::BalloonStats)
                 .map_err(VmmActionError::InternalVmm),
             GetFullVmConfig => Ok(VmmData::FullVmConfig((&self.vm_resources).into())),
+            GetMemoryHotplugStatus => self
+                .vmm
+                .lock()
+                .expect("Poisoned lock")
+                .memory_hotplug_status()
+                .map(VmmData::VirtioMemStatus)
+                .map_err(VmmActionError::InternalVmm),
             GetMMDS => self.get_mmds(),
             GetVmMachineConfig => Ok(VmmData::MachineConfiguration(
                 self.vm_resources.machine_config.clone(),
@@ -694,7 +731,13 @@ impl RuntimeApiController {
                 .map_err(VmmActionError::BalloonUpdate),
             UpdateBlockDevice(new_cfg) => self.update_block_device(new_cfg),
             UpdateNetworkInterface(netif_update) => self.update_net_rate_limiters(netif_update),
-
+            UpdateMemoryHotplugSize(cfg) => self
+                .vmm
+                .lock()
+                .expect("Poisoned lock")
+                .update_memory_hotplug_size(cfg.requested_size_mib)
+                .map(|_| VmmData::Empty)
+                .map_err(VmmActionError::MemoryHotplugUpdate),
             // Operations not allowed post-boot.
             ConfigureBootSource(_)
             | ConfigureLogger(_)
@@ -709,6 +752,7 @@ impl RuntimeApiController {
             | SetVsockDevice(_)
             | SetMmdsConfiguration(_)
             | SetEntropyDevice(_)
+            | SetMemoryHotplugDevice(_)
             | StartMicroVm
             | UpdateMachineConfiguration(_) => Err(VmmActionError::OperationNotSupportedPostBoot),
         }
@@ -1166,6 +1210,11 @@ mod tests {
         )));
         #[cfg(target_arch = "x86_64")]
         check_unsupported(preboot_request(VmmAction::SendCtrlAltDel));
+        check_unsupported(preboot_request(VmmAction::UpdateMemoryHotplugSize(
+            MemoryHotplugSizeUpdate {
+                requested_size_mib: 0,
+            },
+        )));
     }
 
     fn runtime_request(request: VmmAction) -> Result<VmmData, VmmActionError> {
@@ -1293,5 +1342,8 @@ mod tests {
             root_device: false,
             read_only: false,
         })));
+        check_unsupported(runtime_request(VmmAction::SetMemoryHotplugDevice(
+            MemoryHotplugConfig::default(),
+        )));
     }
 }

@@ -150,6 +150,7 @@ def validate_fc_metrics(metrics):
             "machine_cfg_count",
             "mmds_count",
             "vmm_version_count",
+            "hotplug_memory_count",
         ],
         "i8042": [
             "error_count",
@@ -201,6 +202,8 @@ def validate_fc_metrics(metrics):
             "machine_cfg_fails",
             "mmds_count",
             "mmds_fails",
+            "hotplug_memory_count",
+            "hotplug_memory_fails",
         ],
         "put_api_requests": [
             "actions_count",
@@ -227,6 +230,8 @@ def validate_fc_metrics(metrics):
             "pmem_fails",
             "serial_count",
             "serial_fails",
+            "hotplug_memory_count",
+            "hotplug_memory_fails",
         ],
         "seccomp": [
             "num_faults",
@@ -300,6 +305,26 @@ def validate_fc_metrics(metrics):
             "cfg_fails",
             "event_fails",
             "queue_event_count",
+        ],
+        "memory_hotplug": [
+            "activate_fails",
+            "queue_event_fails",
+            "queue_event_count",
+            "plug_count",
+            "plug_bytes",
+            "plug_fails",
+            {"plug_agg": latency_agg_metrics_fields},
+            "unplug_count",
+            "unplug_bytes",
+            "unplug_fails",
+            "unplug_discard_fails",
+            {"unplug_agg": latency_agg_metrics_fields},
+            "state_count",
+            "state_fails",
+            {"state_agg": latency_agg_metrics_fields},
+            "unplug_all_count",
+            "unplug_all_fails",
+            {"unplug_all_agg": latency_agg_metrics_fields},
         ],
     }
 
