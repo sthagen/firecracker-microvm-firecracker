@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v1.14.0]
 
 ### Added
 
@@ -16,12 +16,19 @@ and this project adheres to
 - [#5534](https://github.com/firecracker-microvm/firecracker/pull/5534): Added
   support for memory hot-plugging through the `virtio-mem` device. See
   [documentation](docs/memory-hotplug.md) for more information.
+- [#5491](https://github.com/firecracker-microvm/firecracker/pull/5491): Added
+  support for `virtio-balloon` free page reporting and hinting. Free page
+  reporting is a developer preview not for production feature. See
+  [documentation](docs/ballooning.md) for more information.
 
 ### Changed
 
 - [#4028](https://github.com/firecracker-microvm/firecracker/pull/4028):
   Firecracker now creates the log and metrics files if they do not exist,
   simplifying the launch of Firecracker by removing a manual step.
+- [#5516](https://github.com/firecracker-microvm/firecracker/pull/5516): Balloon
+  stats now supports guest kernel >= 6.12, adding metrics on guest OOM kills,
+  memory allocation stalls, and memory scan/reclaim info.
 - [#5526](https://github.com/firecracker-microvm/firecracker/pull/5526): Specify
   IA32_MTRRdefType MSR on VM boot to allow it to set page attributes for memory
   regions.
@@ -52,6 +59,9 @@ and this project adheres to
 - [#5494](https://github.com/firecracker-microvm/firecracker/pull/5494): Fixed a
   watchdog soft lockup bug on microVMs restored from snapshots by calling
   KVM_KVMCLOCK_CTRL ioctl before resuming.
+- [#5538](https://github.com/firecracker-microvm/firecracker/pull/5538): Fixed a
+  cache coherency issue on non-FWB aarch64 platforms by adding `dma-coherent`
+  property to virtio-mmio nodes in the FDT.
 
 ## [1.13.0]
 
