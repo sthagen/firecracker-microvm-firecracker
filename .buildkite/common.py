@@ -273,7 +273,7 @@ class BKPipeline:
         if not args.binary_dir and with_build_step:
             build_cmds, self.shared_build = shared_build()
             self.build_group_per_arch(
-                "🏗️ Build", build_cmds, depends_on_build=False, set_key=self.shared_build
+                "build", build_cmds, depends_on_build=False, set_key=self.shared_build
             )
         else:
             self.shared_build = None
@@ -375,6 +375,12 @@ class BKPipeline:
     def to_json(self):
         """Serialize the pipeline to JSON"""
         return json.dumps(self.to_dict(), indent=4, sort_keys=True, ensure_ascii=False)
+
+    def devtool_download_artifacts(self, artifacts):
+        """Generate a `devtool download_ci_artifacts` command"""
+        parts = ["./tools/devtool -y download_ci_artifacts"]
+        parts += artifacts
+        return " ".join(parts)
 
     def devtool_test(self, devtool_opts=None, pytest_opts=None):
         """Generate a `devtool test` command"""
