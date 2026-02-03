@@ -66,6 +66,10 @@
                 "comment": "Called for expanding the heap"
             },
             {
+                "syscall": "gettid",
+                "comment": "Rust std uses it during panic to print the thread id."
+            },
+            {
                 "syscall": "clock_gettime",
                 "comment": "Used for metrics and logging, via the helpers in utils/src/time.rs. It's not called on some platforms, because of vdso optimisations."
             },
@@ -320,6 +324,10 @@
                 ]
             },
             {
+                "syscall": "sendto",
+                "comment": "Rust std uses it to write to unix socket"
+            },
+            {
                 "syscall": "tkill",
                 "comment": "tkill is used by libc::abort during a panic to raise SIGABRT",
                 "args": [
@@ -512,6 +520,10 @@
                 "comment": "Called for expanding the heap"
             },
             {
+                "syscall": "gettid",
+                "comment": "Rust std uses it during panic to print the thread id."
+            },
+            {
                 "syscall": "clock_gettime",
                 "comment": "Used for metrics and logging, via the helpers in utils/src/time.rs. It's not called on some platforms, because of vdso optimisations."
             },
@@ -652,19 +664,6 @@
                 ]
             },
             {
-                "syscall": "madvise",
-                "comment": "Triggered on some deallocation paths in musl free()",
-                "args": [
-                    {
-                        "index": 2,
-                        "type": "dword",
-                        "op": "eq",
-                        "val": 8,
-                        "comment": "libc::MADV_FREE"
-                    }
-                ]
-            },
-            {
                 "syscall": "mmap",
                 "comment": "Used for reading the timezone in LocalTime::now()",
                 "args": [
@@ -730,6 +729,10 @@
                 ]
             },
             {
+                "syscall": "sendto",
+                "comment": "Rust std uses it to write to unix socket"
+            },
+            {
                 "syscall": "tkill",
                 "comment": "tkill is used by libc::abort during a panic to raise SIGABRT",
                 "args": [
@@ -791,6 +794,10 @@
             {
                 "syscall": "brk",
                 "comment": "Called for expanding the heap"
+            },
+            {
+                "syscall": "gettid",
+                "comment": "Rust std uses it during panic to print the thread id."
             },
             {
                 "syscall": "clock_gettime",
@@ -891,19 +898,6 @@
                         "op": "eq",
                         "val": 4,
                         "comment": "libc::MADV_DONTNEED"
-                    }
-                ]
-            },
-            {
-                "syscall": "madvise",
-                "comment": "Triggered on some deallocation paths in musl free()",
-                "args": [
-                    {
-                        "index": 2,
-                        "type": "dword",
-                        "op": "eq",
-                        "val": 8,
-                        "comment": "libc::MADV_FREE"
                     }
                 ]
             },
