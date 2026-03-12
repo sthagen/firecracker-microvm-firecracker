@@ -10,6 +10,11 @@ and this project adheres to
 
 ### Added
 
+- [#5323](https://github.com/firecracker-microvm/firecracker/pull/5323): Add
+  support for Vsock Unix domain socket path overriding on snapshot restore. More
+  information can be found in the
+  [docs](docs/vsock.md/#unix-domain-socket-renaming).
+
 ### Changed
 
 ### Deprecated
@@ -18,7 +23,7 @@ and this project adheres to
 
 ### Fixed
 
-## [v1.15.0]
+## [1.15.0]
 
 ### Added
 
@@ -70,7 +75,7 @@ and this project adheres to
 - [#5739](https://github.com/firecracker-microvm/firecracker/pull/5739): Fixed
   validation of TCP SYN options length when MMDS is enabled.
 
-## [v1.14.0]
+## [1.14.0]
 
 ### Added
 
