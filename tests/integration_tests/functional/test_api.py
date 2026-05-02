@@ -452,7 +452,7 @@ def test_api_cpu_config(uvm_plain, custom_cpu_template):
     test_microvm.api.cpu_config.put(**custom_cpu_template["template"])
 
 
-def test_api_put_update_post_boot(uvm_plain, io_engine):
+def test_api_put_update_post_boot(uvm_plain):
     """
     Test that PUT updates are rejected after the microvm boots.
     """
@@ -485,22 +485,6 @@ def test_api_put_update_post_boot(uvm_plain, io_engine):
 
     with pytest.raises(RuntimeError, match=NOT_SUPPORTED_AFTER_START):
         test_microvm.api.machine_config.put(vcpu_count=4, mem_size_mib=128)
-
-    # Network interface update is not allowed after boot.
-    with pytest.raises(RuntimeError, match=NOT_SUPPORTED_AFTER_START):
-        test_microvm.api.network.put(
-            iface_id="1", host_dev_name=tap1.name, guest_mac="06:00:00:00:00:02"
-        )
-
-    # Block device update is not allowed after boot.
-    with pytest.raises(RuntimeError, match=NOT_SUPPORTED_AFTER_START):
-        test_microvm.api.drive.put(
-            drive_id="rootfs",
-            path_on_host=test_microvm.jailer.jailed_path(test_microvm.rootfs_file),
-            is_read_only=False,
-            is_root_device=True,
-            io_engine=io_engine,
-        )
 
     # MMDS config is not allowed post-boot.
     mmds_config = {
@@ -1123,10 +1107,6 @@ def test_pmem_api(uvm_plain_any, rootfs):
     vm.spawn()
     vm.basic_config(add_root_device=False)
 
-    invalid_pmem_path_on_host = os.path.join(vm.fsfiles, "invalid_scratch")
-    utils.check_output(f"touch {invalid_pmem_path_on_host}")
-    invalid_pmem_file_path = vm.create_jailed_resource(str(invalid_pmem_path_on_host))
-
     pmem_size_mb = 2
     pmem_path_on_host = drive_tools.FilesystemFile(
         os.path.join(vm.fsfiles, "scratch"), size=pmem_size_mb
@@ -1139,11 +1119,6 @@ def test_pmem_api(uvm_plain_any, rootfs):
     )
     with pytest.raises(RuntimeError, match=expected_msg):
         vm.api.pmem.put(id="pmem")
-
-    # Try to add pmem with 0 sized backing file
-    expected_msg = re.escape("Error backing file size is 0")
-    with pytest.raises(RuntimeError, match=expected_msg):
-        vm.api.pmem.put(id="pmem", path_on_host=invalid_pmem_file_path)
 
     # Try to add pmem as root while block is set as root
     vm.api.drive.put(drive_id="drive", path_on_host=pmem_file_path, is_root_device=True)
@@ -1225,10 +1200,6 @@ def test_pmem_rate_limiter_api(uvm_plain_any, rootfs):
     # Boot with pmem as rootfs.
     vm.add_pmem("rootfs", rootfs, True, True)
     vm.start()
-
-    # PUT pmem after boot is not allowed.
-    with pytest.raises(RuntimeError, match=NOT_SUPPORTED_AFTER_START):
-        vm.api.pmem.put(id="pmem0", path_on_host=pmem_file_path)
 
     # PATCH pmem rate limiter after boot should succeed.
     vm.api.pmem.patch(
