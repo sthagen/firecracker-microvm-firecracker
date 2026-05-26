@@ -546,6 +546,7 @@ guest_kernel_linux_6_1 = pytest.fixture(
     guest_kernel_fxt,
     params=kernel_params("vmlinux-6.1*"),
 )
+guest_kernel_default = guest_kernel_linux_6_1
 
 
 def match_rootfs_to_kernel(request):
@@ -581,15 +582,9 @@ def rootfs_rw(request):
 
 
 @pytest.fixture
-def uvm_plain(microvm_factory, guest_kernel_linux_5_10, rootfs, pci_enabled):
+def uvm_plain(microvm_factory, guest_kernel_default, rootfs, pci_enabled):
     """Create a vanilla VM, non-parametrized"""
-    return microvm_factory.build(guest_kernel_linux_5_10, rootfs, pci=pci_enabled)
-
-
-@pytest.fixture
-def uvm_plain_6_1(microvm_factory, guest_kernel_linux_6_1, rootfs, pci_enabled):
-    """Create a vanilla VM, non-parametrized"""
-    return microvm_factory.build(guest_kernel_linux_6_1, rootfs, pci=pci_enabled)
+    return microvm_factory.build(guest_kernel_default, rootfs, pci=pci_enabled)
 
 
 @pytest.fixture
@@ -599,9 +594,9 @@ def uvm_plain_acpi(microvm_factory, guest_kernel_acpi, rootfs, pci_enabled):
 
 
 @pytest.fixture
-def uvm_plain_rw(microvm_factory, guest_kernel_linux_5_10, rootfs_rw):
+def uvm_plain_rw(microvm_factory, guest_kernel_default, rootfs_rw):
     """Create a vanilla VM, non-parametrized"""
-    return microvm_factory.build(guest_kernel_linux_5_10, rootfs_rw)
+    return microvm_factory.build(guest_kernel_default, rootfs_rw)
 
 
 @pytest.fixture
@@ -633,12 +628,13 @@ guest_kernel_6_1_debug = pytest.fixture(
     guest_kernel_fxt,
     params=kernel_params("vmlinux-6.1*", artifact_dir=defs.ARTIFACT_DIR / "debug"),
 )
+guest_kernel_default_debug = guest_kernel_6_1_debug
 
 
 @pytest.fixture
-def uvm_plain_debug(microvm_factory, guest_kernel_6_1_debug, rootfs_rw):
+def uvm_plain_debug(microvm_factory, guest_kernel_default_debug, rootfs_rw):
     """VM running a kernel with debug/trace Kconfig options"""
-    return microvm_factory.build(guest_kernel_6_1_debug, rootfs_rw)
+    return microvm_factory.build(guest_kernel_default_debug, rootfs_rw)
 
 
 @pytest.fixture
@@ -794,3 +790,25 @@ def uvm_any_without_pci(
         vcpu_count=vcpu_count,
         mem_size_mib=mem_size_mib,
     )
+
+
+@pytest.fixture
+def uvm_with_fips(microvm_factory, guest_kernel_linux_6_1, rootfs_rw):
+    """Boot a microVM with FIPS mode enabled."""
+    uvm = microvm_factory.build(guest_kernel_linux_6_1, rootfs_rw)
+    uvm.spawn()
+    uvm.basic_config(boot_args="console=ttyS0 reboot=k panic=1 pci=off fips=1")
+    uvm.add_net_iface()
+    uvm.start()
+    return uvm
+
+
+@pytest.fixture
+def fips_snapshot_pair(uvm_with_fips, microvm_factory):
+    """Boot a FIPS VM, snapshot it, restore two VMs from the same snapshot."""
+    snapshot = uvm_with_fips.snapshot_full()
+    uvm_with_fips.kill()
+
+    uvm_a = microvm_factory.build_from_snapshot(snapshot)
+    uvm_b = microvm_factory.build_from_snapshot(snapshot)
+    yield uvm_a, uvm_b
