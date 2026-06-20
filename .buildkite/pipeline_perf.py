@@ -30,7 +30,7 @@ perf_test = {
         "label": "vhost-user-block",
         "tests": "integration_tests/performance/test_block.py::test_block_vhost_user_performance",
         "devtool_opts": "-c 1-10 -m 0",
-        "ab_opts": "--noise-threshold 0.1",
+        "ab_opts": "--noise-threshold bw_read=0.1",
     },
     "pmem": {
         "label": "pmem",
@@ -51,6 +51,9 @@ perf_test = {
         "label": "memory-hotplug",
         "tests": "integration_tests/performance/test_hotplug_memory.py",
         "devtool_opts": "-c 1-10 -m 0",
+        # The test require polling (5 ms), so any change smaller than that is not significant.
+        # Additionally, unplugging memory is dependent on how exactly it's being used, so some volatility is expected.
+        "ab_opts": "--absolute-strength 0.005 --noise-threshold hotunplug_total_time=0.1",
     },
     "snapshot-latency": {
         "label": "snapshot-latency",
@@ -61,11 +64,6 @@ perf_test = {
         "label": "population-latency",
         "tests": "integration_tests/performance/test_snapshot.py::test_population_latency",
         "devtool_opts": "-c 1-12 -m 0",
-    },
-    "misc": {
-        "label": "misc",
-        "tests": "integration_tests/performance/test_memory_overhead.py integration_tests/performance/test_boottime.py::test_boottime integration_tests/performance/test_process_startup_time.py integration_tests/performance/test_jailer.py integration_tests/performance/test_mmds.py",
-        "devtool_opts": "-c 1-10 -m 0",
     },
     "memory-overhead": {
         "label": "memory-overhead",
@@ -86,6 +84,7 @@ perf_test = {
         "label": "jailer",
         "tests": "integration_tests/performance/test_jailer.py",
         "devtool_opts": "-c 1-10 -m 0",
+        "ab_opts": "--noise-threshold startup=0.1",
     },
     "mmds": {
         "label": "mmds",
@@ -94,20 +93,11 @@ perf_test = {
     },
 }
 
-# These can only be selected by manually providing `--tests` argument otherwise
-# the number of unique tasks we would create is too big for BK to handle
-only_manually_selected_tests = [
-    "memory-overhead",
-    "boottime",
-    "process-startup",
-    "jailer",
-    "mmds",
-]
-
 REVISION_A = os.environ.get("REVISION_A")
 REVISION_B = os.environ.get("REVISION_B")
 REVISION_A_ARTIFACTS = os.environ.get("REVISION_A_ARTIFACTS")
 REVISION_B_ARTIFACTS = os.environ.get("REVISION_B_ARTIFACTS")
+A_B_TEST_MAX_ITERATIONS = 4
 
 # Either both are specified or neither. Only doing either is a bug. If you want to
 # run performance tests _on_ a specific commit, specify neither and put your commit
@@ -125,21 +115,11 @@ BKPipeline.parser.add_argument(
     action="append",
 )
 
-retry = {}
-if REVISION_A:
-    # Enable automatic retry and disable manual retries to suppress spurious issues.
-    retry["automatic"] = [
-        {"exit_status": -1, "limit": 1},
-        {"exit_status": 1, "limit": 1},
-    ]
-    retry["manual"] = False
-
 pipeline = BKPipeline(
     # Boost priority from 1 to 2 so these jobs are preferred by ag=1 agents
     priority=2,
     # use ag=1 instances to make sure no two performance tests are scheduled on the same instance
     agents={"ag": 1},
-    retry=retry,
     # Heavy post-failure dumps (full snapshot + chroot copy) are useful
     # for triaging performance flakes that are hard to reproduce locally.
     # Cheap dumps are always on; this flag turns the heavy block on.
@@ -149,10 +129,7 @@ pipeline = BKPipeline(
 if pipeline.args.test:
     tests = [perf_test[test] for test in pipeline.args.test]
 else:
-    tests = []
-    for test_name, test_description in perf_test.items():
-        if test_name not in only_manually_selected_tests:
-            tests.append(test_description)
+    tests = perf_test.values()
 
 for test in tests:
     devtool_opts = test.pop("devtool_opts")
@@ -163,7 +140,7 @@ for test in tests:
     artifacts = []
     if REVISION_A:
         devtool_opts += " --ab"
-        test_script_opts = f'{ab_opts} run --binaries-a build/{REVISION_A}/ --binaries-b build/{REVISION_B} --pytest-opts "{test_selector}"'
+        test_script_opts = f'{ab_opts} run --binaries-a build/{REVISION_A}/ --binaries-b build/{REVISION_B} --max-iterations={A_B_TEST_MAX_ITERATIONS} --pytest-opts "{test_selector}"'
         if REVISION_A_ARTIFACTS:
             artifacts.append(REVISION_A_ARTIFACTS)
             artifacts.append(REVISION_B_ARTIFACTS)
