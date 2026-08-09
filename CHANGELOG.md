@@ -22,6 +22,10 @@ and this project adheres to
   will use transparent huge pages for the guest memory via
   `madvise(MADV_HUGEPAGE)`. Guest memory must be a multiple of 2MB when using
   this option.
+- [#6013](https://github.com/firecracker-microvm/firecracker/pull/6013),
+  [#6017](https://github.com/firecracker-microvm/firecracker/pull/6017),
+  [#6021](https://github.com/firecracker-microvm/firecracker/pull/6021): Added
+  official support for 6.18 microVM guest kernels.
 - [#6037](https://github.com/firecracker-microvm/firecracker/pull/6037): Added
   support for booting `bzImage` guest kernels on x86_64, in addition to the
   existing uncompressed ELF (`vmlinux`) images. The kernel image format is
@@ -39,7 +43,8 @@ and this project adheres to
   TOCTOU race in the aarch64 jailer when setting ownership of the CPU cache and
   `MIDR_EL1` information files copied into the chroot.
 - [#6031](https://github.com/firecracker-microvm/firecracker/pull/6031),
-  [#6041](https://github.com/firecracker-microvm/firecracker/pull/6041): Fixed
+  [#6041](https://github.com/firecracker-microvm/firecracker/pull/6041),
+  [#6077](https://github.com/firecracker-microvm/firecracker/pull/6077): Fixed
   the vsock device re-arming its host-stream `EPOLLIN` interest while received
   data was still awaiting a guest RX buffer, which could busy-spin the event
   thread until the guest posted buffers. The device now drains the host stream
@@ -49,6 +54,9 @@ and this project adheres to
   in most configurations. On single-vcpu microVMs on the newest Intel hosts
   (m7i, m8i), host-to-guest throughput may instead decrease by ~15% (median),
   where the single guest vCPU rather than the host becomes the bottleneck.
+  Terminating a connection now also discards its TX buffer, so the device stops
+  advertising `EPOLLOUT` for a host stream it will never write to again, which
+  could otherwise busy-spin the event thread indefinitely.
 
 ## [1.16.1]
 
