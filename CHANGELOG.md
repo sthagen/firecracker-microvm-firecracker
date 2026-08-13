@@ -42,6 +42,13 @@ and this project adheres to
 - [#5956](https://github.com/firecracker-microvm/firecracker/pull/5956): Fixed a
   TOCTOU race in the aarch64 jailer when setting ownership of the CPU cache and
   `MIDR_EL1` information files copied into the chroot.
+- [#6076](https://github.com/firecracker-microvm/firecracker/pull/6076): Fixed
+  memory hotplug sizes silently wrapping when converted from MiB to bytes.
+  `requested_size_mib` on `PATCH /hotplug/memory` and `total_size_mib`,
+  `block_size_mib` and `slot_size_mib` on `PUT /hotplug/memory` are now bounded
+  to 32 bits. Values above that previously wrapped to a smaller byte count, so a
+  large enough request was accepted as a 0-byte region instead of being
+  rejected.
 - [#6031](https://github.com/firecracker-microvm/firecracker/pull/6031),
   [#6041](https://github.com/firecracker-microvm/firecracker/pull/6041),
   [#6077](https://github.com/firecracker-microvm/firecracker/pull/6077): Fixed
@@ -57,6 +64,11 @@ and this project adheres to
   Terminating a connection now also discards its TX buffer, so the device stops
   advertising `EPOLLOUT` for a host stream it will never write to again, which
   could otherwise busy-spin the event thread indefinitely.
+- [#6086](https://github.com/firecracker-microvm/firecracker/pull/6086): Fixed a
+  potential deadlock in the logger: a signal handler that logs while the
+  interrupted thread already held the logger lock would re-acquire it and hang
+  the VMM. The logger now uses an `RwLock` so logging takes a shared lock that a
+  nested (signal-handler) log can re-acquire without blocking.
 
 ## [1.16.1]
 
