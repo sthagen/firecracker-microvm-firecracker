@@ -4,14 +4,10 @@
 use std::io;
 use std::ops::{Deref, Range};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
 
 use bitvec::vec::BitVec;
 use serde::{Deserialize, Serialize};
-use vm_memory::{
-    Address, Bytes, GuestAddress, GuestMemory, GuestMemoryBackend, GuestMemoryError,
-    GuestMemoryRegion, GuestUsize,
-};
+use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend};
 use vmm_sys_util::eventfd::EventFd;
 
 use super::{MEM_NUM_QUEUES, MEM_QUEUE};
@@ -21,7 +17,6 @@ use crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1;
 use crate::devices::virtio::generated::virtio_mem::{
     self, VIRTIO_MEM_F_UNPLUGGED_INACCESSIBLE, virtio_mem_config,
 };
-use crate::devices::virtio::iov_deque::IovDequeError;
 use crate::devices::virtio::mem::VIRTIO_MEM_DEV_ID;
 use crate::devices::virtio::mem::metrics::METRICS;
 use crate::devices::virtio::mem::request::{BlockRangeState, Request, RequestedRange, Response};
@@ -33,9 +28,7 @@ use crate::impl_device_type;
 use crate::logger::{IncMetric, debug, error, info, warn};
 use crate::utils::{bytes_to_u32_mib, u32_mib_to_bytes, u64_to_usize, usize_to_u64};
 use crate::vstate::interrupts::InterruptError;
-use crate::vstate::memory::{
-    ByteValued, GuestMemoryExtension, GuestMemoryMmap, GuestRegionMmap, GuestRegionType,
-};
+use crate::vstate::memory::{ByteValued, GuestMemoryExtension, GuestMemoryMmap, GuestRegionType};
 use crate::vstate::vm::{KvmVm, VmError};
 
 // SAFETY: virtio_mem_config only contains plain data types
@@ -315,7 +308,7 @@ impl VirtioMem {
             .ok_or(VirtioMemError::InvalidRange(*range))?;
 
         // Ensure the end offset (exclusive) is within the usable region
-        let end_off = start_off
+        let _end_off = start_off
             .checked_add(usize_to_u64(self.nb_blocks_to_len(range.nb_blocks)))
             .filter(|&end_off| end_off <= self.config.usable_region_size)
             .ok_or(VirtioMemError::InvalidRange(*range))?;
@@ -451,8 +444,6 @@ impl VirtioMem {
 
     fn process_mem_queue(&mut self) -> Result<(), VirtioMemError> {
         while let Some(desc) = self.queues[MEM_QUEUE].pop()? {
-            let index = desc.index;
-
             let (req, resp_addr, used_idx) = self.parse_request(&desc)?;
             debug!("virtio-mem: Request: {:?}", req);
             // Handle request and write response
@@ -503,60 +494,103 @@ impl VirtioMem {
         &self.activate_event
     }
 
-    fn update_kvm_slots(&self, updated_range: &RequestedRange) -> Result<(), VirtioMemError> {
+    /// Applies the request to a single KVM slot: updates KVM first and, only if that succeeds,
+    /// commits the block state for the blocks the request touches and (when unplugging) discards
+    /// them. Committing after the KVM update keeps the block state consistent with KVM on a partial
+    /// failure, and a block is never discarded before it is committed as unplugged.
+    ///
+    /// Returns `true` if the slot's discard failed. That is not fatal and is not reported to the
+    /// driver; the caller aggregates it into a single metric per request.
+    fn apply_range_to_slot(
+        &mut self,
+        slot_num: u32,
+        slot_first_block: usize,
+        slot_nb_blocks: usize,
+        req_blocks: &Range<usize>,
+        plug: bool,
+    ) -> Result<bool, VirtioMemError> {
+        let slot_blocks = slot_first_block..(slot_first_block + slot_nb_blocks);
+        let touched = slot_blocks.start.max(req_blocks.start)..slot_blocks.end.min(req_blocks.end);
+        // The slot stays plugged into KVM if any of its blocks is plugged once the request applies.
+        let keep_plugged = slot_blocks.clone().any(|b| {
+            if touched.contains(&b) {
+                plug
+            } else {
+                self.plugged_blocks[b]
+            }
+        });
+
         let hp_region = self
             .guest_memory()
             .iter()
             .find(|r| r.region_type == GuestRegionType::Hotpluggable)
             .expect("there should be one and only one hotpluggable region");
         hp_region
-            .slots_intersecting_range(
-                updated_range.addr,
-                self.nb_blocks_to_len(updated_range.nb_blocks),
-            )
-            .try_for_each(|(slot, _)| {
-                let slot_range = RequestedRange {
-                    addr: slot.guest_addr,
-                    nb_blocks: slot.slice.len() / u64_to_usize(self.config.block_size),
-                };
-                match self.range_state(&slot_range) {
-                    BlockRangeState::Mixed | BlockRangeState::Plugged => {
-                        hp_region.update_slot(&self.vm, &slot, true)
-                    }
-                    BlockRangeState::Unplugged => hp_region.update_slot(&self.vm, &slot, false),
-                }
-                .map_err(VirtioMemError::UpdateKvmSlot)
-            })
+            .update_slot(&self.vm, &hp_region.mem_slot(slot_num), keep_plugged)
+            .map_err(VirtioMemError::UpdateKvmSlot)?;
+
+        let plugged_before = self.plugged_blocks[touched.clone()].count_ones();
+        self.plugged_blocks[touched.clone()].fill(plug);
+        let plugged_after = self.plugged_blocks[touched.clone()].count_ones();
+        self.config.plugged_size -= usize_to_u64(self.nb_blocks_to_len(plugged_before));
+        self.config.plugged_size += usize_to_u64(self.nb_blocks_to_len(plugged_after));
+
+        if !plug {
+            let addr =
+                GuestAddress(self.config.addr + touched.start as u64 * self.config.block_size);
+            if let Err(err) = self
+                .guest_memory()
+                .discard_range(addr, self.nb_blocks_to_len(touched.len()))
+            {
+                error!("virtio-mem: Failed to discard memory range: {}", err);
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
-    /// Plugs/unplugs the given range
+    /// Plugs/unplugs the given range, one KVM slot at a time.
     ///
     /// Note: the range passed to this function must be within the device memory to avoid
     /// out-of-bound panics.
     fn update_range(&mut self, range: &RequestedRange, plug: bool) -> Result<(), VirtioMemError> {
-        // Update internal state
-        let block_range = self.unchecked_block_range(range);
-        let plugged_blocks_slice = &mut self.plugged_blocks[block_range];
-        let plugged_before = plugged_blocks_slice.count_ones();
-        plugged_blocks_slice.fill(plug);
-        let plugged_after = plugged_blocks_slice.count_ones();
-        self.config.plugged_size -= usize_to_u64(self.nb_blocks_to_len(plugged_before));
-        self.config.plugged_size += usize_to_u64(self.nb_blocks_to_len(plugged_after));
+        let block_size = self.config.block_size;
+        let req_blocks = self.unchecked_block_range(range);
 
-        // Update kvm slots before doing any discards to prevent guest from re-faulting just
-        // discarded memory.
-        self.update_kvm_slots(range)?;
+        // Nothing is plugged in this range, so there is nothing to discard. UNPLUG_ALL covers the
+        // whole region, so this skip avoids repeatedly re-discarding an already-unplugged region.
+        if !plug && self.plugged_blocks[req_blocks.clone()].count_ones() == 0 {
+            return Ok(());
+        }
 
-        // If unplugging, discard the range
-        if !plug {
-            self.guest_memory()
-                .discard_range(range.addr, self.nb_blocks_to_len(range.nb_blocks))
-                .inspect_err(|err| {
-                    // Failure to discard is not fatal and is not reported to the driver. It only
-                    // gets logged.
-                    METRICS.unplug_discard_fails.inc();
-                    error!("virtio-mem: Failed to discard memory range: {}", err);
-                });
+        // Snapshot the intersecting slots so the loop can borrow `self` mutably to commit state.
+        let slots: Vec<(u32, usize, usize)> = {
+            let hp_region = self
+                .guest_memory()
+                .iter()
+                .find(|r| r.region_type == GuestRegionType::Hotpluggable)
+                .expect("there should be one and only one hotpluggable region");
+            hp_region
+                .slots_intersecting_range(range.addr, self.nb_blocks_to_len(range.nb_blocks))
+                .map(|(slot, _)| {
+                    let first_block =
+                        u64_to_usize((slot.guest_addr.0 - self.config.addr) / block_size);
+                    (
+                        slot.slot,
+                        first_block,
+                        slot.slice.len() / u64_to_usize(block_size),
+                    )
+                })
+                .collect()
+        };
+
+        let mut discard_failed = false;
+        for (slot_num, first_block, block_count) in slots {
+            discard_failed |=
+                self.apply_range_to_slot(slot_num, first_block, block_count, &req_blocks, plug)?;
+        }
+        if discard_failed {
+            METRICS.unplug_discard_fails.inc();
         }
         Ok(())
     }
@@ -704,7 +738,9 @@ impl VirtioDevice for VirtioMem {
     fn kick(&mut self) {
         if self.is_activated() {
             info!("kick mem {}.", self.id());
-            self.process_virtio_queues();
+            if let Err(err) = self.process_virtio_queues() {
+                error!("virtio-mem: Failed to process queues: {err}");
+            }
         }
     }
 }
@@ -713,7 +749,6 @@ impl VirtioDevice for VirtioMem {
 pub(crate) mod test_utils {
     use super::*;
     use crate::devices::virtio::test_utils::test::VirtioTestDevice;
-    use crate::test_utils::single_region_mem;
     use crate::utils::mib_to_bytes;
     use crate::vmm_config::machine_config::HugePageConfig;
     use crate::vstate::memory;
@@ -742,7 +777,8 @@ pub(crate) mod test_utils {
             .pop()
             .unwrap(),
             mib_to_bytes(128),
-        );
+        )
+        .unwrap();
         let vm = Arc::new(vm);
         VirtioMem::new(vm, addr, 1024, 2, 128).unwrap()
     }
@@ -750,11 +786,6 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use std::ptr::null_mut;
-
-    use serde_json::de;
-    use vm_memory::guest_memory;
-    use vm_memory::mmap::MmapRegionBuilder;
 
     use super::*;
     use crate::devices::virtio::device::{VirtioDevice, VirtioDeviceType};
@@ -867,7 +898,7 @@ mod tests {
 
     #[test]
     fn test_status() {
-        let mut mem = default_virtio_mem();
+        let mem = default_virtio_mem();
         let status = mem.status();
         assert_eq!(
             status,
@@ -920,7 +951,7 @@ mod tests {
 
     #[test]
     fn test_event_fail_descriptor_chain_too_short() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
 
@@ -936,7 +967,7 @@ mod tests {
 
     #[test]
     fn test_event_fail_descriptor_length_too_small() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
 
@@ -952,7 +983,7 @@ mod tests {
 
     #[test]
     fn test_event_fail_unexpected_writeonly_descriptor() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
 
@@ -968,7 +999,7 @@ mod tests {
 
     #[test]
     fn test_event_fail_unexpected_readonly_descriptor() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
 
@@ -984,7 +1015,7 @@ mod tests {
 
     #[test]
     fn test_event_fail_response_descriptor_length_too_small() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
 
@@ -1011,7 +1042,7 @@ mod tests {
 
     #[test]
     fn test_update_requested_size_invalid_size() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
 
@@ -1034,7 +1065,7 @@ mod tests {
 
     #[test]
     fn test_update_requested_size_success() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
 
@@ -1044,10 +1075,10 @@ mod tests {
 
     #[test]
     fn test_plug_request_success() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(1024);
+        th.device().update_requested_size(1024).unwrap();
         let addr = th.device().guest_address();
 
         let queue_event_count = METRICS.queue_event_count.count();
@@ -1073,10 +1104,10 @@ mod tests {
 
     #[test]
     fn test_plug_request_too_big() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(2);
+        th.device().update_requested_size(2).unwrap();
         let addr = th.device().guest_address();
 
         let plug_count = METRICS.plug_count.count();
@@ -1097,10 +1128,10 @@ mod tests {
 
     #[test]
     fn test_plug_request_already_plugged() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(1024);
+        th.device().update_requested_size(1024).unwrap();
         let addr = th.device().guest_address();
 
         // First plug succeeds
@@ -1122,10 +1153,10 @@ mod tests {
 
     #[test]
     fn test_unplug_request_success() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(1024);
+        th.device().update_requested_size(1024).unwrap();
         let addr = th.device().guest_address();
 
         let unplug_count = METRICS.unplug_count.count();
@@ -1157,10 +1188,10 @@ mod tests {
 
     #[test]
     fn test_unplug_request_not_plugged() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(1024);
+        th.device().update_requested_size(1024).unwrap();
         let addr = th.device().guest_address();
 
         let unplug_count = METRICS.unplug_count.count();
@@ -1181,10 +1212,10 @@ mod tests {
 
     #[test]
     fn test_unplug_all_request() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(1024);
+        th.device().update_requested_size(1024).unwrap();
         let addr = th.device().guest_address();
 
         let unplug_all_count = METRICS.unplug_all_count.count();
@@ -1208,12 +1239,66 @@ mod tests {
         assert_eq!(METRICS.unplug_all_fails.count(), unplug_all_fails);
     }
 
+    /// A plug spanning two slots where the second slot's KVM update fails must leave only the first
+    /// slot's block committed, not the whole request.
     #[test]
-    fn test_state_request_unplugged() {
-        let mut mem_dev = default_virtio_mem();
+    fn test_plug_partial_kvm_failure_keeps_state_consistent() {
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(1024);
+        th.device().update_requested_size(1024).unwrap();
+        let block_size = th.device().config.block_size;
+        // Last block of slot 0 and first block of slot 1.
+        let addr = th.device().guest_address().unchecked_add(63 * block_size);
+
+        th.device().vm.fail_next_set_user_memory_region(2);
+
+        let resp = emulate_request(
+            &mut th,
+            &guest_mem,
+            Request::Plug(RequestedRange { addr, nb_blocks: 2 }),
+        );
+        assert!(resp.is_error());
+
+        assert_eq!(th.device().plugged_size_mib(), 2);
+        let block_range = th
+            .device()
+            .unchecked_block_range(&RequestedRange { addr, nb_blocks: 2 });
+        assert!(th.device().plugged_blocks[block_range.start]);
+        assert!(!th.device().plugged_blocks[block_range.start + 1]);
+    }
+
+    #[test]
+    fn test_repeated_unplug_all_is_noop() {
+        let mem_dev = default_virtio_mem();
+        let guest_mem = mem_dev.vm.guest_memory().clone();
+        let mut th = test_helper(mem_dev, &guest_mem);
+        th.device().update_requested_size(1024).unwrap();
+        let addr = th.device().guest_address();
+
+        let resp = emulate_request(
+            &mut th,
+            &guest_mem,
+            Request::Plug(RequestedRange { addr, nb_blocks: 2 }),
+        );
+        assert!(resp.is_ack());
+        let resp = emulate_request(&mut th, &guest_mem, Request::UnplugAll);
+        assert!(resp.is_ack());
+        assert_eq!(th.device().plugged_size_mib(), 0);
+
+        let unplug_all_fails = METRICS.unplug_all_fails.count();
+        let resp = emulate_request(&mut th, &guest_mem, Request::UnplugAll);
+        assert!(resp.is_ack());
+        assert_eq!(th.device().plugged_size_mib(), 0);
+        assert_eq!(METRICS.unplug_all_fails.count(), unplug_all_fails);
+    }
+
+    #[test]
+    fn test_state_request_unplugged() {
+        let mem_dev = default_virtio_mem();
+        let guest_mem = mem_dev.vm.guest_memory().clone();
+        let mut th = test_helper(mem_dev, &guest_mem);
+        th.device().update_requested_size(1024).unwrap();
         let addr = th.device().guest_address();
 
         let state_count = METRICS.state_count.count();
@@ -1232,10 +1317,10 @@ mod tests {
 
     #[test]
     fn test_state_request_plugged() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(1024);
+        th.device().update_requested_size(1024).unwrap();
         let addr = th.device().guest_address();
 
         // Plug first
@@ -1257,10 +1342,10 @@ mod tests {
 
     #[test]
     fn test_state_request_mixed() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(1024);
+        th.device().update_requested_size(1024).unwrap();
         let addr = th.device().guest_address();
 
         // Plug first block only
@@ -1282,10 +1367,10 @@ mod tests {
 
     #[test]
     fn test_invalid_range_unaligned() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(1024);
+        th.device().update_requested_size(1024).unwrap();
         let addr = th.device().guest_address().unchecked_add(1);
 
         let state_count = METRICS.state_count.count();
@@ -1304,10 +1389,10 @@ mod tests {
 
     #[test]
     fn test_invalid_range_zero_blocks() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(1024);
+        th.device().update_requested_size(1024).unwrap();
         let addr = th.device().guest_address();
 
         let resp = emulate_request(
@@ -1320,10 +1405,10 @@ mod tests {
 
     #[test]
     fn test_invalid_range_out_of_bounds() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
-        th.device().update_requested_size(4);
+        th.device().update_requested_size(4).unwrap();
         let addr = th.device().guest_address();
 
         let resp = emulate_request(
@@ -1339,7 +1424,7 @@ mod tests {
 
     #[test]
     fn test_unsupported_request() {
-        let mut mem_dev = default_virtio_mem();
+        let mem_dev = default_virtio_mem();
         let guest_mem = mem_dev.vm.guest_memory().clone();
         let mut th = test_helper(mem_dev, &guest_mem);
 

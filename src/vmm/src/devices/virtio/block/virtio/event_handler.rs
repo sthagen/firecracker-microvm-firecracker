@@ -96,13 +96,16 @@ impl MutEventSubscriber for VirtioBlock {
                 source
             );
             match source {
+                Self::PROCESS_ACTIVATE => {
+                    let _ = self.activate_evt.read();
+                }
                 Self::PROCESS_QUEUE => self.drain_queue_events(),
                 Self::PROCESS_RATE_LIMITER => {
-                    self.rate_limiter.event_handler();
+                    let _ = self.rate_limiter.event_handler();
                 }
                 Self::PROCESS_ASYNC_COMPLETION => {
                     if let FileEngine::Async(ref engine) = self.disk.file_engine {
-                        engine.completion_evt().read();
+                        let _ = engine.completion_evt().read();
                     }
                 }
                 _ => (),

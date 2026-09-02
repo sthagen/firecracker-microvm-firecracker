@@ -79,9 +79,12 @@ impl MutEventSubscriber for Pmem {
         if !self.is_activated() {
             warn!("pmem: The device is not activated yet. Spurious event received from {source}");
             match source {
+                Self::PROCESS_ACTIVATE => {
+                    let _ = self.activate_event.read();
+                }
                 Self::PROCESS_PMEM_QUEUE => self.drain_queue_events(),
                 Self::PROCESS_RATE_LIMITER => {
-                    self.rate_limiter.event_handler();
+                    let _ = self.rate_limiter.event_handler();
                 }
                 _ => (),
             }

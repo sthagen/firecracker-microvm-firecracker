@@ -76,7 +76,11 @@ impl MutEventSubscriber for VirtioMem {
 
         if !self.is_activated() {
             warn!("virtio-mem: The device is not activated yet. Spurious event received: {source}");
-            self.drain_queue_events();
+            if source == Self::PROCESS_ACTIVATE {
+                let _ = self.activate_event().read();
+            } else {
+                self.drain_queue_events();
+            }
             return;
         }
 
@@ -96,7 +100,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use event_manager::{EventManager, SubscriberOps};
-    use vmm_sys_util::epoll::EventSet;
 
     use super::*;
     use crate::devices::virtio::ActivateError;
