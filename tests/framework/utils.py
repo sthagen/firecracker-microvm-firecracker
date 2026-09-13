@@ -20,7 +20,6 @@ from typing import Dict
 
 import psutil
 import semver
-from packaging import version
 from tenacity import (
     Retrying,
     retry,
@@ -283,6 +282,77 @@ def get_stable_rss_mem(uvm, percentage_delta=1):
 
     print("WARNING: RSS readings did not stabilize")
     return second_rss
+
+
+FILLMEM_OUTPUT_PATH = "/tmp/fillmem_output.txt"
+FILLMEM_SUCCESS = "Memory filling was successful"
+OOM_SETTLE_S = 5
+
+
+def wait_for_fillmem(ssh_connection, timeout_s=30):
+    """Poll fillmem's status file until the guest reports the run finished."""
+    status = ""
+    for attempt in Retrying(
+        stop=stop_after_delay(timeout_s),
+        wait=wait_fixed(0.5),
+        retry=retry_if_exception_type(AssertionError),
+        reraise=True,
+    ):
+        with attempt:
+            exit_code, stdout, stderr = ssh_connection.run(f"cat {FILLMEM_OUTPUT_PATH}")
+            # fillmem writes a trailing NUL byte.
+            status = stdout.replace("\x00", "").strip()
+            assert (
+                status
+            ), f"fillmem did not report a result (cat exit {exit_code}: {stderr.strip()})"
+    return status
+
+
+def lower_ssh_oom_chance(ssh_connection):
+    """Lure OOM away from ssh process"""
+    logger = logging.getLogger("lower_ssh_oom_chance")
+
+    cmd = "pidof sshd"
+    exit_code, stdout, stderr = ssh_connection.run(cmd)
+    # add something to the logs for troubleshooting
+    if exit_code != 0:
+        logger.error("while running: %s", cmd)
+        logger.error("stdout: %s", stdout)
+        logger.error("stderr: %s", stderr)
+        return
+
+    for pid in stdout.split():
+        cmd = f"choom -n -1000 -p {pid}"
+        exit_code, stdout, stderr = ssh_connection.run(cmd)
+        if exit_code != 0:
+            logger.error("while running: %s", cmd)
+            logger.error("stdout: %s", stdout)
+            logger.error("stderr: %s", stderr)
+
+
+def make_guest_dirty_memory(ssh_connection, amount_mib=32, oom_expected=False):
+    """Tell the guest, over ssh, to dirty `amount` pages of memory."""
+    lower_ssh_oom_chance(ssh_connection)
+
+    # Start fillmem detached so that an OOM kill of the ssh session cannot
+    # abort it. It truncates the status file when done, so remove any
+    # output from a previous run.
+    ssh_connection.check_output(
+        f"rm -f {FILLMEM_OUTPUT_PATH}; "
+        f"nohup /usr/local/bin/fillmem {amount_mib} >/dev/null 2>&1 </dev/null &"
+    )
+
+    if oom_expected:
+        # The guest is meant to come under memory pressure and may stop
+        # responding altogether, so there is no status worth waiting for.
+        # Give the guest kernel time to react instead.
+        time.sleep(OOM_SETTLE_S)
+        return
+
+    status = wait_for_fillmem(ssh_connection)
+    assert (
+        status == FILLMEM_SUCCESS
+    ), f"fillmem failed to dirty {amount_mib} MiB: {status}"
 
 
 def _format_output_message(proc, stdout, stderr):
@@ -551,11 +621,6 @@ def get_kernel_version(level=2):
             linux_version = linux_version[0:idx]
             break
     return linux_version
-
-
-def supports_hugetlbfs_discard():
-    """Returns True if the kernel supports hugetlbfs discard"""
-    return version.parse(get_kernel_version()) >= version.parse("5.18.0")
 
 
 def generate_mmds_session_token(
